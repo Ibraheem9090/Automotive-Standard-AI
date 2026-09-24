@@ -55,26 +55,35 @@ qdrant_client = get_qdrant_client()
 # ==========================================
 # 3. Helper Functions
 # ==========================================
-def get_embedding(text: str) -> list[float]:
+def get_embedding(text: str) -> list[float] | None:
     """Generates vector embedding using NVIDIA NIM API."""
-    response = nvidia_client.embeddings.create(
-        input=[text],
-        model="nvidia/nv-embed-v1",
-        encoding_format="float"
-    )
-    return response.data[0].embedding
+    try:
+        response = nvidia_client.embeddings.create(
+            input=[text],
+            model="nvidia/nv-embed-v1",
+            encoding_format="float",
+            extra_body={"input_type": "query"}  # Required for NVIDIA NIM Embeddings API
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        st.error(f"Error generating embedding from NVIDIA NIM API: {e}")
+        return None
 
 def search_qdrant(query_vector: list[float], top_k: int = 4):
     """Searches Qdrant Cloud for matching standard chunks."""
-    results = qdrant_client.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        limit=top_k
-    )
-    return [hit.payload for hit in results]
+    try:
+        results = qdrant_client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_vector,
+            limit=top_k
+        )
+        return [hit.payload for hit in results]
+    except Exception as e:
+        st.error(f"Error querying Qdrant Cloud: {e}")
+        return []
 
 @st.cache_data(show_spinner=False)
-def render_pdf_page_from_url(github_raw_url: str, page_number: int) -> Image.Image:
+def render_pdf_page_from_url(github_raw_url: str, page_number: int) -> Image.Image | None:
     """Fetches PDF from GitHub and renders target page to a PIL Image."""
     try:
         response = requests.get(github_raw_url, timeout=10)
@@ -129,8 +138,8 @@ if "active_pdf_pages" not in st.session_state:
 with st.sidebar:
     st.title("⚙️ System Status")
     st.info("👨‍💻 Creator: **Ibraheem**")
-    st.success("🟢 NVIDIA NIM API Connected")
-    st.success("🟢 Qdrant Cloud Connected")
+    st.success("🟢 API Connected")
+    st.success("🟢 Cloud Connected")
     st.divider()
     
     st.markdown("### 🔍 Quick Features")
@@ -166,23 +175,29 @@ with col_chat:
         with st.chat_message("assistant"):
             with st.spinner("Searching standard vectors and retrieving page references..."):
                 query_vec = get_embedding(user_query)
-                retrieved_chunks = search_qdrant(query_vec, top_k=3)
                 
-                if not retrieved_chunks:
-                    answer = "No relevant standard specifications found in Qdrant database."
+                if query_vec is None:
+                    answer = "Failed to generate embedding for your query. Please verify API key configuration."
                     st.session_state.active_pdf_pages = []
                 else:
-                    answer = generate_answer(user_query, retrieved_chunks)
+                    retrieved_chunks = search_qdrant(query_vec, top_k=3)
                     
-                    # Store referenced page info for image viewer
-                    st.session_state.active_pdf_pages = [
-                        {
-                            "doc_id": chunk.get("doc_id"),
-                            "page_number": chunk.get("page_number"),
-                            "github_raw_url": chunk.get("github_raw_url")
-                        }
-                        for chunk in retrieved_chunks
-                    ]
+                    if not retrieved_chunks:
+                        answer = "No relevant standard specifications found in Qdrant database."
+                        st.session_state.active_pdf_pages = []
+                    else:
+                        answer = generate_answer(user_query, retrieved_chunks)
+                        
+                        # Store referenced page info for image viewer
+                        st.session_state.active_pdf_pages = [
+                            {
+                                "doc_id": chunk.get("doc_id"),
+                                "page_number": chunk.get("page_number"),
+                                "github_raw_url": chunk.get("github_raw_url")
+                            }
+                            for chunk in retrieved_chunks
+                            if chunk.get("github_raw_url")
+                        ]
                 
                 st.markdown(answer)
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
