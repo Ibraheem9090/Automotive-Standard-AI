@@ -1,12 +1,13 @@
 import os
-import fitz  # PyMuPDF
+import pymupdf as fitz  # Updated to remove PyMuPDF deprecation warning
 from src.nvidia_client import NVIDIAClient
 from src.qdrant_manager import QdrantManager
 
 class PDFIngestionPipeline:
     def __init__(self):
         self.nvidia_client = NVIDIAClient()
-        self.qdrant_manager = QdrantManager()
+        # Explicitly initialize with 2048 dimensions for nemotron-3-embed-1b
+        self.qdrant_manager = QdrantManager(vector_size=2048)
 
     def process_and_index_pdf(self, pdf_path: str, doc_id: str, source_site: str, url: str) -> bool:
         """
