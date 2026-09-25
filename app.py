@@ -56,14 +56,13 @@ qdrant_client = get_qdrant_client()
 # 3. Helper Functions
 # ==========================================
 def get_embedding(text: str) -> list[float] | None:
-    """Generates vector embedding using NVIDIA NIM API."""
+    """Generates 4096-dim vector embedding using NVIDIA NIM API."""
     try:
         response = nvidia_client.embeddings.create(
             input=[text],
-            # Replaced retired model with active NVIDIA NIM embedding model
-            model="nvidia/nemotron-3-embed-1b",
+            model="nvidia/nemotron-3-embed-8b",  # 4096-dimension embedding model
             encoding_format="float",
-            extra_body={"input_type": "query"}  # Required for NVIDIA NIM Embeddings API
+            extra_body={"input_type": "query"}
         )
         return response.data[0].embedding
     except Exception as e:
