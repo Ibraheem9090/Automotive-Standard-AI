@@ -73,11 +73,12 @@ def get_embedding(text: str) -> list[float] | None:
 def search_qdrant(query_vector: list[float], top_k: int = 4):
     """Searches Qdrant Cloud for matching standard chunks."""
     try:
-        results = qdrant_client.query_points(
+        response = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
+            query=query_vector,  # Use 'query=', NOT 'query_vector='
             limit=top_k
         )
+        # Extract payload from points in the QueryResponse
         return [point.payload for point in response.points]
     except Exception as e:
         st.error(f"Error querying Qdrant Cloud: {e}")
