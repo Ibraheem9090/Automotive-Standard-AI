@@ -61,7 +61,7 @@ def get_embedding(text: str) -> list[float] | None:
         response = nvidia_client.embeddings.create(
             input=[text],
             # Replaced retired model with active NVIDIA NIM embedding model
-            model="nvidia/llama-3.2-nv-embedqa-1b-v2",
+            model="nvidia/nemotron-3-embed-1b",
             encoding_format="float",
             extra_body={"input_type": "query"}  # Required for NVIDIA NIM Embeddings API
         )
