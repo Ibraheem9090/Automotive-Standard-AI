@@ -1,134 +1,102 @@
 import os
 import re
+import json
 import requests
 import urllib3
-import urllib.parse
 from bs4 import BeautifulSoup
-from typing import List, Dict, Any
 from src.ingestion import IngestionPipeline
 
-# Suppress SSL warnings for ARAI / govt portals with self-signed or expired certs
+# Suppress insecure HTTPS request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+PDF_DIR = "pdf_store"
+MANIFEST_FILE = os.path.join(PDF_DIR, "standards_manifest.json")
+os.makedirs(PDF_DIR, exist_ok=True)
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-ARAI_AIS_CATALOG_URL = "https://www.araiindia.com/downloads/ais-downloads"
-
-
-def discover_all_arai_standards() -> List[Dict[str, Any]]:
-    """
-    Dynamically crawls ARAI's AIS Downloads portal and extracts all published AIS standards.
-    """
-    print(f"[Crawler] Scraping ARAI standards catalog from {ARAI_AIS_CATALOG_URL}...")
-    discovered_standards = []
-    page_num = 1
-    
-    while True:
-        url = f"{ARAI_AIS_CATALOG_URL}?page={page_num}" if page_num > 1 else ARAI_AIS_CATALOG_URL
+def load_manifest():
+    if os.path.exists(MANIFEST_FILE):
         try:
-            res = requests.get(url, headers=HEADERS, verify=False, timeout=30)
+            with open(MANIFEST_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_manifest(manifest):
+    with open(MANIFEST_FILE, "w") as f:
+        json.dump(manifest, f, indent=4)
+
+def scrape_and_download():
+    print("[Sync Engine] Starting automotive standards scraper...")
+    manifest = load_manifest()
+    pipeline = IngestionPipeline()
+    
+    # Target catalog sources
+    sources = [
+        {
+            "name": "AIS",
+            "url": "https://araiindia.com/downloads",
+            "pattern": r".*AIS.*\.pdf$"
+        }
+    ]
+
+    downloaded_count = 0
+
+    for source in sources:
+        print(f"[Sync Engine] Fetching catalog from {source['name']}: {source['url']}")
+        try:
+            res = requests.get(source['url'], headers=HEADERS, verify=False, timeout=15)
             if res.status_code != 200:
-                print(f"[Crawler] Stopped at page {page_num} (HTTP {res.status_code})")
-                break
-                
-            soup = BeautifulSoup(res.text, "html.parser")
-            rows = soup.find_all("tr")
-            page_items = 0
-
-            for row in rows:
-                cols = row.find_all("td")
-                pdf_link = row.find("a", href=re.compile(r'\.pdf$', re.IGNORECASE))
-                
-                if pdf_link:
-                    href = pdf_link['href']
-                    full_url = urllib.parse.urljoin(ARAI_AIS_CATALOG_URL, href)
-                    
-                    # Extract document title/code (e.g., AIS-156, AIS-038)
-                    code_text = cols[1].get_text(strip=True) if len(cols) > 1 else ""
-                    doc_id = re.sub(r'[^A-Za-z0-9_-]', '_', code_text).strip('_')
-                    
-                    if not doc_id:
-                        doc_id = href.split('/')[-1].replace('.pdf', '')
-
-                    discovered_standards.append({
-                        "doc_id": doc_id,
-                        "standard_family": "AIS",
-                        "domain": "ARAI Technical Regulation",
-                        "url": full_url,
-                        "source_site": "ARAI"
-                    })
-                    page_items += 1
-
-            # Break loop if no PDF links found on page or pagination ends
-            next_page = soup.find("a", string=re.compile(r'next|अगला|>', re.IGNORECASE))
-            if not next_page or page_items == 0:
-                break
-                
-            page_num += 1
-
-        except Exception as e:
-            print(f"[Crawler] Error scanning page {page_num}: {e}")
-            break
-
-    print(f"[Crawler] Total AIS standards discovered on ARAI: {len(discovered_standards)}")
-    return discovered_standards
-
-
-def download_file(url: str, output_path: str) -> bool:
-    """Downloads PDF with SSL verification bypassed and custom user-agent."""
-    try:
-        response = requests.get(url, headers=HEADERS, verify=False, timeout=30, stream=True)
-        if response.status_code == 200:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            return True
-        else:
-            print(f"[HTTP {response.status_code}] Download failed: {url}")
-            return False
-    except Exception as e:
-        print(f"[Error] Failed downloading {url}: {e}")
-        return False
-
-
-def run_full_extraction(pipeline: IngestionPipeline, static_config_path: str = "config/standards_sources.json"):
-    all_targets = []
-
-    # 1. Dynamically discover ALL AIS standards directly from ARAI website
-    arai_standards = discover_all_arai_standards()
-    all_targets.extend(arai_standards)
-
-    # 2. Add static non-scrapable standards (ASPICE PAM, ISO specs requiring manual paths)
-    if os.path.exists(static_config_path):
-        import json
-        with open(static_config_path, "r") as f:
-            static_sources = json.load(f)
-            # Add sources not covered by the ARAI web crawler
-            for item in static_sources:
-                if item.get("standard_family") != "AIS":
-                    all_targets.append(item)
-
-    print(f"\n[Pipeline] Ready to process {len(all_targets)} total standards into Qdrant...\n")
-
-    # 3. Process every discovered standard
-    for item in all_targets:
-        doc_id = item["doc_id"]
-        pdf_path = f"pdf_store/{doc_id}.pdf"
-        
-        print(f"--> Processing [{doc_id}] from {item['source_site']}...")
-
-        if not os.path.exists(pdf_path):
-            if "url" in item and item["url"]:
-                success = download_file(item["url"], pdf_path)
-                if not success:
-                    continue
-            else:
-                print(f"[Skipped] Local file missing and no URL for {doc_id}")
+                print(f"[Sync Engine Warning] Received status code {res.status_code} from {source['url']}")
                 continue
 
-        # Pass PDF to parser, chunker, NVIDIA Nemotron embedding, and Qdrant DB
-        pipeline.process_and_index(pdf_path, item)
+            soup = BeautifulSoup(res.text, "html.parser")
+            links = soup.find_all("a", href=True)
+            print(f"[Sync Engine] Found {len(links)} total links on page.")
+
+            for link in links:
+                href = link["href"]
+                # Match PDF URLs
+                if href.lower().endswith(".pdf") or "AIS" in href.upper():
+                    pdf_url = href if href.startswith("http") else f"https://araiindia.com{href}"
+                    filename = os.path.basename(pdf_url.split("?")[0])
+                    if not filename.endswith(".pdf"):
+                        filename += ".pdf"
+
+                    file_path = os.path.join(PDF_DIR, filename)
+
+                    if os.path.exists(file_path):
+                        print(f"[Sync Engine] Skipping {filename} (Already exists locally).")
+                        continue
+
+                    print(f"[Sync Engine] Downloading: {pdf_url}")
+                    pdf_res = requests.get(pdf_url, headers=HEADERS, verify=False, timeout=30)
+                    if pdf_res.status_code == 200 and len(pdf_res.content) > 1000:
+                        with open(file_path, "wb") as f:
+                            f.write(pdf_res.content)
+                        
+                        doc_id = filename.replace(".pdf", "").upper()
+                        manifest[doc_id] = {"url": pdf_url, "file_path": file_path}
+                        save_manifest(manifest)
+                        downloaded_count += 1
+
+                        # Process & Index into Qdrant
+                        pipeline.process_and_index(file_path, {
+                            "doc_id": doc_id,
+                            "standard_family": source["name"],
+                            "url": pdf_url
+                        })
+                    else:
+                        print(f"[Sync Engine Warning] Failed to download valid PDF from {pdf_url}")
+
+        except Exception as e:
+            print(f"[Sync Engine Error] Failed scraping {source['name']}: {e}")
+
+    print(f"[Sync Engine Complete] Finished sync. Downloaded {downloaded_count} new PDF(s).")
+
+if __name__ == "__main__":
+    scrape_and_download()
