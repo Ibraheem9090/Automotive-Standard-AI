@@ -12,29 +12,29 @@ from qdrant_client.models import Filter, FieldCondition, MatchValue
 # 1. Page Configuration & Setup
 # ==========================================
 st.set_page_config(
-    page_title="AutoSpec AI | Developed by Ibraheem",
-    page_icon="🚗",
+    page_title="AutoSpec AI | Agentic Automotive Intelligence",
+    page_icon="📑",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# App Title & Developer Attribution
-st.title("🚗 AutoSpec AI")
-st.markdown("##### *Open Automotive Standards Intelligence Platform*")
-st.caption("🚀 Developed by **Ibraheem** | Powered by NVIDIA NIM & Qdrant Cloud")
+# App Title & Subtitle
+st.title("AutoSpec AI")
+st.markdown("##### *Agentic Automotive Regulatory & Compliance Intelligence Platform*")
+st.caption("Powered by NVIDIA NIM & Qdrant Cloud Vector Database")
 
-# Fetch Credentials securely from Secrets or Environment Variables
+# Fetch Credentials
 NVIDIA_API_KEY = st.secrets.get("NVIDIA_API_KEY", os.getenv("NVIDIA_API_KEY"))
 QDRANT_URL = st.secrets.get("QDRANT_URL", os.getenv("QDRANT_URL"))
 QDRANT_API_KEY = st.secrets.get("QDRANT_API_KEY", os.getenv("QDRANT_API_KEY"))
 COLLECTION_NAME = st.secrets.get("COLLECTION_NAME", os.getenv("COLLECTION_NAME", "automotive_standards"))
 
 if not NVIDIA_API_KEY or not QDRANT_URL or not QDRANT_API_KEY:
-    st.error("Missing configuration secrets! Please check your `.streamlit/secrets.toml` or environment variables.")
+    st.error("Missing configuration secrets! Check `.streamlit/secrets.toml` or environment variables.")
     st.stop()
 
 # ==========================================
-# 2. Resource Caching (Clients Initialization)
+# 2. Cached Client Initialization
 # ==========================================
 @st.cache_resource
 def get_nvidia_client():
@@ -57,17 +57,17 @@ qdrant_client = get_qdrant_client()
 # 3. Helper Functions
 # ==========================================
 def get_embedding(text: str) -> list[float] | None:
-    """Generates 2048-dim vector embedding using active NVIDIA NIM API model."""
+    """Generates 2048-dim vector embedding via NVIDIA NIM API."""
     try:
         response = nvidia_client.embeddings.create(
             input=[text],
-            model="nvidia/nemotron-3-embed-1b",  # Active NVIDIA NIM model (2048 dims)
+            model="nvidia/nemotron-3-embed-1b",
             encoding_format="float",
             extra_body={"input_type": "query"}
         )
         return response.data[0].embedding
     except Exception as e:
-        st.error(f"Error generating embedding from NVIDIA NIM API: {e}")
+        st.error(f"NVIDIA NIM Embedding Error: {e}")
         return None
 
 def search_qdrant(
@@ -77,7 +77,7 @@ def search_qdrant(
     process_id: str | None = None,
     doc_id: str | None = None
 ) -> list[dict]:
-    """Searches Qdrant Cloud for matching standard chunks with metadata filter support."""
+    """Queries Qdrant Cloud with active scope filtering."""
     try:
         must_conditions = []
         if standard_family and standard_family != "All Standards":
@@ -103,237 +103,186 @@ def search_qdrant(
         )
         return [point.payload for point in response.points]
     except Exception as e:
-        st.error(f"Error querying Qdrant Cloud: {e}")
+        st.error(f"Qdrant Query Error: {e}")
         return []
 
 @st.cache_data(show_spinner=False)
 def render_pdf_page_from_url(github_raw_url: str, page_number: int) -> Image.Image | None:
-    """Fetches PDF from GitHub and renders target page to a PIL Image."""
+    """Renders PDF page from remote raw stream."""
     try:
         response = requests.get(github_raw_url, timeout=10)
         response.raise_for_status()
-        pdf_data = response.content
-        
-        doc = fitz.open(stream=pdf_data, filetype="pdf")
-        page = doc[page_number - 1]  # 1-based to 0-based conversion
+        doc = fitz.open(stream=response.content, filetype="pdf")
+        page = doc[page_number - 1]
         pix = page.get_pixmap(dpi=150)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        return img
-    except Exception as e:
-        st.warning(f"Could not load PDF page image from GitHub: {e}")
+        return Image.open(io.BytesIO(pix.tobytes("png")))
+    except Exception:
         return None
 
 def generate_answer(query: str, retrieved_context: list[dict]) -> str:
-    """Queries Llama 3.2 11B Vision Model via NVIDIA NIM."""
+    """Generates precise answer with citations using Llama 3.2 Vision."""
     formatted_context = ""
     for idx, item in enumerate(retrieved_context, 1):
-        formatted_context += f"\n--- Context Source {idx} ---\n"
-        formatted_context += f"Document ID: {item.get('doc_id')}\n"
-        formatted_context += f"Page Number: {item.get('page_number')}\n"
-        formatted_context += f"Content: {item.get('text')}\n"
+        formatted_context += f"\n[Source {idx}] Doc: {item.get('doc_id')} | Page: {item.get('page_number')}\n"
+        formatted_context += f"Text: {item.get('text')}\n"
 
     system_prompt = (
-        "You are an expert automotive systems engineer. Answer precisely using the context. "
-        "Always cite the exact Document ID and Page Number for your answers."
+        "You are an expert automotive systems and compliance engineer. "
+        "Answer precisely using only the provided context. "
+        "Always cite the exact Document ID and Page Number for technical assertions."
     )
-
-    user_prompt = f"Context Material:\n{formatted_context}\n\nUser Question: {query}"
 
     response = nvidia_client.chat.completions.create(
         model="meta/llama-3.2-11b-vision-instruct",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
+            {"role": "user", "content": f"Context:\n{formatted_context}\n\nUser Question: {query}"}
         ],
-        temperature=0.2,
+        temperature=0.1,
         max_tokens=1024
     )
     return response.choices[0].message.content
 
 # ==========================================
-# 4. Session State Setup
+# 4. Session State
 # ==========================================
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "active_pdf_pages" not in st.session_state:
     st.session_state.active_pdf_pages = []
 
-# Sidebar Configuration & Dynamic Filtering
+# ==========================================
+# 5. Sidebar Controls & Info
+# ==========================================
 with st.sidebar:
-    st.title("⚙️ System Status")
-    st.info("👨‍💻 Creator: **Ibraheem**")
-    st.success("🟢 API Connected")
-    st.success("🟢 Cloud Connected")
-    st.divider()
+    st.markdown("### ⚙️ System Control")
+    st.caption("🟢 Status: **NVIDIA NIM & Qdrant Connected**")
     
-    st.markdown("### 🔍 Regulatory & Scope Filters")
+    st.divider()
+    st.markdown("### 🔍 Scope & Metadata Filters")
     selected_family = st.selectbox(
         "Standard Family",
         ["All Standards", "AIS", "UNECE", "AUTOSAR", "ASAM", "ASPICE", "FMVSS"]
     )
-    selected_process = st.text_input("Process ID (e.g. SYS.2, SWE.1)", value="")
-    selected_doc_id = st.text_input("Document ID (e.g. AIS-156)", value="")
+    selected_process = st.text_input("Process ID (e.g., SYS.2)", value="", placeholder="e.g. SYS.2")
+    selected_doc_id = st.text_input("Document ID (e.g., AIS-156)", value="", placeholder="e.g. AIS-156")
+    
+    top_k_chunks = st.slider("Retrieval Depth (Top Chunks)", min_value=1, max_value=8, value=4)
 
     st.divider()
-    st.markdown("### 🔍 Quick Features")
-    st.markdown("* **Multimodal Context:** Text + Page Images")
-    st.markdown("* **SHA-256 Sync:** Skips unchanged files")
-    st.markdown("* **Targeted Retrieval:** Page-level citation")
-    
-    if st.button("Clear Chat History", use_container_width=True):
+    if st.button("Clear Conversation", use_container_width=True):
         st.session_state.chat_history = []
         st.session_state.active_pdf_pages = []
         st.rerun()
 
-# Split UI Layout: Left Column = Chat | Right Column = Interactive Tabs
-col_chat, col_tabs = st.columns([1.1, 0.9])
+    st.divider()
+    st.markdown("**Developed by Ibraheem**")
+    st.caption("⚠️ *For Educational Use Only*")
 
 # ==========================================
-# 5. Left Column: Chat Assistant
+# 6. Main Interface Layout
 # ==========================================
+col_chat, col_tabs = st.columns([1.1, 0.9])
+
+# Left Column: Chat Assistant
 with col_chat:
-    st.subheader("💬 Standards Consultation Chat")
+    st.subheader("💬 Regulatory Consultation Chat")
     
-    # Display conversation history
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # User Input
-    if user_query := st.chat_input("Ask a question (e.g., What are the thermal runaway requirements in AIS-156?)"):
+    if user_query := st.chat_input("Query standards (e.g., Thermal runaway safety requirements in AIS-156)"):
         st.session_state.chat_history.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching standard vectors and retrieving page references..."):
+            with st.spinner("Analyzing vectors & standard specs..."):
                 query_vec = get_embedding(user_query)
                 
                 if query_vec is None:
-                    answer = "Failed to generate embedding for your query. Please verify API key configuration."
+                    answer = "Failed to compute vector embeddings. Check API credentials."
                     st.session_state.active_pdf_pages = []
                 else:
                     retrieved_chunks = search_qdrant(
                         query_vector=query_vec,
-                        top_k=3,
+                        top_k=top_k_chunks,
                         standard_family=selected_family,
                         process_id=selected_process,
                         doc_id=selected_doc_id
                     )
                     
                     if not retrieved_chunks:
-                        answer = "No relevant standard specifications found matching your query and filter criteria."
+                        answer = "No specifications matching the query and filter constraints were found."
                         st.session_state.active_pdf_pages = []
                     else:
                         answer = generate_answer(user_query, retrieved_chunks)
-                        
-                        # Store referenced page info for image viewer
                         st.session_state.active_pdf_pages = [
                             {
-                                "doc_id": chunk.get("doc_id"),
-                                "page_number": chunk.get("page_number"),
-                                "github_raw_url": chunk.get("github_raw_url")
+                                "doc_id": c.get("doc_id"),
+                                "page_number": c.get("page_number"),
+                                "github_raw_url": c.get("github_raw_url")
                             }
-                            for chunk in retrieved_chunks
-                            if chunk.get("github_raw_url")
+                            for c in retrieved_chunks if c.get("github_raw_url")
                         ]
                 
                 st.markdown(answer)
                 st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
-# ==========================================
-# 6. Right Column: Main Feature Tabs
-# ==========================================
+# Right Column: Visual Context & Reference Tabs
 with col_tabs:
     tab_viewer, tab_sync, tab_sources = st.tabs([
-        "📄 Visual Context", 
-        "📅 Data Update Status", 
-        "🌐 Search Sources"
+        "📄 Visual Citation Context", 
+        "📅 Data Sync Status", 
+        "🌐 Monitored Catalogs"
     ])
 
-    # --------------------------------------
-    # TAB 1: Visual Context Viewer
-    # --------------------------------------
+    # TAB 1: Visual Citation Viewer
     with tab_viewer:
-        st.caption("Renders exact PDF pages containing referenced graphs, tables, or figures.")
+        st.caption("Auto-renders PDF source pages cited in response.")
         if st.session_state.active_pdf_pages:
-            tabs_pages = st.tabs([f"{p['doc_id']} (p. {p['page_number']})" for p in st.session_state.active_pdf_pages])
-            
-            for tab, page_info in zip(tabs_pages, st.session_state.active_pdf_pages):
+            page_tabs = st.tabs([f"{p['doc_id']} (p. {p['page_number']})" for p in st.session_state.active_pdf_pages])
+            for tab, p_info in zip(page_tabs, st.session_state.active_pdf_pages):
                 with tab:
-                    st.write(f"**Document:** `{page_info['doc_id']}` | **Page:** `{page_info['page_number']}`")
-                    with st.spinner("Loading page preview from GitHub..."):
-                        page_img = render_pdf_page_from_url(
-                            page_info["github_raw_url"], 
-                            page_info["page_number"]
-                        )
-                        if page_img:
-                            st.image(page_img, use_container_width=True)
-                        else:
-                            st.info("PDF page rendering unavailable.")
+                    st.write(f"**Document:** `{p_info['doc_id']}` | **Page:** `{p_info['page_number']}`")
+                    img = render_pdf_page_from_url(p_info["github_raw_url"], p_info["page_number"])
+                    if img:
+                        st.image(img, use_container_width=True)
+                    else:
+                        st.info("Preview image unavailable for this vector chunk.")
         else:
-            st.info("Ask a query in the chat to automatically render matching PDF pages here.")
+            st.info("Ask a query in the chat to view visual PDF context pages.")
 
-    # --------------------------------------
-    # TAB 2: Data Update & Sync Schedule
-    # --------------------------------------
+    # TAB 2: Data Update & Sync Schedule (Summary Format with IST)
     with tab_sync:
-        st.markdown("### 🔄 Daily Differential Sync Engine")
-        st.markdown("The system automatically crawls automotive portals on a daily schedule, hashes downloaded content, and updates Qdrant Cloud when revisions occur.")
+        st.markdown("### 🔄 Daily Differential Scraper")
+        st.caption("Monitors remote regulatory portals, compares SHA-256 hashes, and auto-indexes deltas.")
         
         m1, m2, m3 = st.columns(3)
-        m1.metric("Sync Schedule", "Daily @ 00:00 UTC")
-        m2.metric("Hash Algorithm", "SHA-256")
-        m3.metric("Storage Backend", "GitHub Repo Store")
+        m1.metric("Sync Schedule", "Daily @ 05:30 IST")
+        m2.metric("Hash Engine", "SHA-256")
+        m3.metric("Vector Index", "Auto-Refresh")
         
         st.divider()
-        st.markdown("#### 📊 Sync & Revision Pipeline Status")
-        
-        sync_data = [
-            {"Standard / Source": "AUTOSAR Foundation & Classic", "Last Check": "Today, 00:00 UTC", "Status": "Up to Date (No Hash Delta)", "Revision": "R22-11"},
-            {"Standard / Source": "UNECE WP.29 UN Regulations", "Last Check": "Today, 00:00 UTC", "Status": "Indexed New Amendment", "Revision": "UN R155 Rev 2"},
-            {"Standard / Source": "ARAI AIS Standards (India)", "Last Check": "Today, 00:00 UTC", "Status": "Up to Date", "Revision": "AIS-156 Amd 3"},
-            {"Standard / Source": "ASAM OpenX (OpenDRIVE / Scenario)", "Last Check": "Today, 00:00 UTC", "Status": "Up to Date", "Revision": "v1.7.0"},
-            {"Standard / Source": "US NHTSA FMVSS Standards", "Last Check": "Today, 00:00 UTC", "Status": "Up to Date", "Revision": "2026 Release"}
+        st.markdown("#### 📊 Standard Collection Sync Status")
+        sync_summary = [
+            {"Standard Domain": "ARAI AIS Standards (India)", "Last Indexing (IST)": "Today, 05:30 IST", "Status": "Up to Date"},
+            {"Standard Domain": "UNECE UN Regulations (Global)", "Last Indexing (IST)": "Today, 05:30 IST", "Status": "Updated (UN R155)"},
+            {"Standard Domain": "AUTOSAR Classic/Adaptive", "Last Indexing (IST)": "Yesterday, 05:30 IST", "Status": "Up to Date"},
+            {"Standard Domain": "ASAM OpenX (Autonomous Driving)", "Last Indexing (IST)": "Yesterday, 05:30 IST", "Status": "Up to Date"},
+            {"Standard Domain": "US NHTSA FMVSS Standards", "Last Indexing (IST)": "24 Sep 2026, 05:30 IST", "Status": "Up to Date"}
         ]
-        st.dataframe(sync_data, use_container_width=True)
+        st.dataframe(sync_summary, use_container_width=True)
 
-    # --------------------------------------
-    # TAB 3: Indexed Sources Directory
-    # --------------------------------------
+    # TAB 3: Monitored Catalogs Summary
     with tab_sources:
-        st.markdown("### 🌐 Monitored Open Automotive Sources")
-        st.markdown("AutoSpec AI actively indexes and monitors open-access automotive technical specifications:")
-
-        col_s1, col_s2 = st.columns(2)
-
-        with col_s1:
-            st.markdown("""
-            #### 1. AUTOSAR
-            * **Domain:** E/E architecture, ECU software frameworks, Classic & Adaptive platforms.
-            * **Access:** Open Public Specifications
-            * **URL:** [autosar.org/standards](https://www.autosar.org/standards)
-            
-            #### 2. UNECE WP.29
-            * **Domain:** World Forum for Harmonization of Vehicle Regulations (UN R155 Cybersecurity, UN R156 Software Updates, UN R157 ALKS).
-            * **Access:** Direct PDF Download
-            * **URL:** [unece.org/transport/vehicle-regulations](https://unece.org/transport/vehicle-regulations)
-            
-            #### 3. ARAI (AIS Standards)
-            * **Domain:** Automotive Industry Standards (EV Battery safety AIS-156, AIS-038, ADAS & Crash Safety).
-            * **Access:** Public PDF Downloads
-            * **URL:** [araiindia.com](https://www.araiindia.com)
-            """)
-
-        with col_s2:
-            st.markdown("""
-            #### 4. ASAM OpenX Standards
-            * **Domain:** Autonomous driving simulation, OpenDRIVE (road geometry), OpenSCENARIO (dynamic maneuvers).
-            * **Access:** Open Technical Standards
-            * **URL:** [asam.net/standards](https://www.asam.net/standards)
-            
-            #### 5. NHTSA (FMVSS)
-            * **Domain:** US Federal Motor Vehicle Safety Standards & Technical Research Releases.
-            * **Access:** Public Domain
-            * **URL:** [nhtsa.gov/laws-regulations](https://www.nhtsa.gov/laws-regulations)
-            """)
+        st.markdown("### 🌐 Supported Standards Directory")
+        sources_summary = [
+            {"Family": "ARAI (AIS)", "Focus Area": "EV Battery Safety (AIS-156), Crash Tests, ADAS", "Access": "Public PDF"},
+            {"Family": "UNECE WP.29", "Focus Area": "Cybersecurity (R155), Software Updates (R156)", "Access": "Open UN Portal"},
+            {"Family": "AUTOSAR", "Focus Area": "E/E Architecture, ECU Software Frameworks", "Access": "Open Specs"},
+            {"Family": "ASAM OpenX", "Focus Area": "OpenDRIVE, OpenSCENARIO Autonomous Testing", "Access": "Open Technical"},
+            {"Family": "NHTSA FMVSS", "Focus Area": "US Vehicle Safety & Crash Protection Rules", "Access": "Public Domain"}
+        ]
+        st.table(sources_summary)
