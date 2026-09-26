@@ -1,57 +1,74 @@
 import os
-import pymupdf as fitz  # Updated to remove PyMuPDF deprecation warning
+import uuid
+import fitz  # PyMuPDF
+from typing import Dict, Any, List
 from src.nvidia_client import NVIDIAClient
 from src.qdrant_manager import QdrantManager
 
-class PDFIngestionPipeline:
-    def __init__(self):
-        self.nvidia_client = NVIDIAClient()
-        # Explicitly initialize with 2048 dimensions for nemotron-3-embed-1b
-        self.qdrant_manager = QdrantManager(vector_size=2048)
+class IngestionPipeline:
+    def __init__(
+        self, 
+        nvidia_client: NVIDIAClient | None = None, 
+        qdrant_mgr: QdrantManager | None = None
+    ):
+        self.nvidia_client = nvidia_client or NVIDIAClient()
+        self.qdrant_mgr = qdrant_mgr or QdrantManager()
 
-    def process_and_index_pdf(self, pdf_path: str, doc_id: str, source_site: str, url: str) -> bool:
-        """
-        Parses a PDF file, extracts page text and rendering metadata,
-        generates embeddings via NVIDIA NIM API, and indexes vector points into Qdrant Cloud.
-        """
-        if not os.path.exists(pdf_path):
-            print(f"[Ingestion Error] File not found: {pdf_path}")
-            return False
-
+    def extract_text_by_page(self, pdf_path: str) -> List[Dict[str, Any]]:
+        """Extracts text page-by-page from PDF using PyMuPDF."""
+        pages_data = []
         doc = fitz.open(pdf_path)
-        print(f"[{doc_id}] Indexing {len(doc)} pages into Qdrant...")
-
-        points = []
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text").strip()
+            if text:
+                pages_data.append({
+                    "page_number": page_num + 1,
+                    "text": text
+                })
+        doc.close()
+        return pages_data
 
-            if not text:
-                continue
+    def process_and_index(self, pdf_path: str, metadata: Dict[str, Any]):
+        """Parses PDF, generates 2048-dim embeddings, and upserts points to Qdrant."""
+        if not os.path.exists(pdf_path):
+            print(f"[IngestionPipeline] File not found: {pdf_path}")
+            return
 
-            # Generate vector embedding using NVIDIA NIM API
-            embedding = self.nvidia_client.get_embedding(text)
+        doc_id = metadata.get("doc_id", os.path.basename(pdf_path).replace(".pdf", ""))
+        print(f"[IngestionPipeline] Processing '{doc_id}'...")
+
+        pages = self.extract_text_by_page(pdf_path)
+        if not pages:
+            print(f"[IngestionPipeline] No extractable text in {pdf_path}")
+            return
+
+        points_data = []
+        for p in pages:
+            chunk_text = p["text"]
+            embedding = self.nvidia_client.get_embedding(chunk_text)
+            
             if not embedding:
                 continue
 
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}_p{p['page_number']}"))
+            
             payload = {
                 "doc_id": doc_id,
-                "page_number": page_num + 1,
-                "text": text[:1000],  # Stored text chunk preview
-                "source_site": source_site,
-                "url": url,
-                "pdf_path": pdf_path
+                "page_number": p["page_number"],
+                "text": chunk_text,
+                "standard_family": metadata.get("standard_family", "AIS"),
+                "domain": metadata.get("domain", "Automotive Technical Regulation"),
+                "source_site": metadata.get("source_site", "ARAI"),
+                "url": metadata.get("url", "")
             }
 
-            points.append({
-                "page_number": page_num + 1,
+            points_data.append({
+                "id": point_id,
                 "vector": embedding,
                 "payload": payload
             })
 
-        if points:
-            self.qdrant_manager.upsert_document_points(doc_id=doc_id, points=points)
-            print(f"[{doc_id}] Successfully indexed {len(points)} vector chunks.")
-            return True
-
-        return False
+        if points_data:
+            self.qdrant_mgr.upsert_points(points_data)
+            print(f"[IngestionPipeline] Indexed {len(points_data)} pages for '{doc_id}'.")
