@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 .DS_Store
 data/
+# Allow pdf_store folder and files
+!pdf_store/
