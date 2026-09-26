@@ -2,10 +2,9 @@ name: Daily Standards Sync
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # Runs daily at 2:00 AM UTC
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
-# Give workflow write permissions to commit changes back to repo
 permissions:
   contents: write
 
@@ -34,9 +33,8 @@ jobs:
         run: |
           python scraper_sync.py
 
-      # Commit and push downloaded PDFs back to the repo
       - name: Commit and Push Downloaded PDFs
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore(data): sync newly crawled PDFs to pdf_store"
-          file_pattern: "pdf_store/*.pdf"
+          commit_message: "chore(data): auto-sync scraped PDFs to pdf_store"
+          file_pattern: "pdf_store/*"
