@@ -1,40 +1,31 @@
-name: Daily Automotive Standards Sync
+name: Daily Standards Sync
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs daily at 00:00 UTC
-  workflow_dispatch:      # Allows manual trigger from GitHub UI
+    - cron: '0 2 * * *'  # Runs daily at 2:00 AM UTC
+  workflow_dispatch:
 
 jobs:
-  sync-standards:
+  sync:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v3
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Differential Scraper & Qdrant Indexer
+      - name: Run Standards Sync Scraper
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          GITHUB_REPO: ${{ github.repository }}
-          PYTHONPATH: .
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
           python scraper_sync.py
-
-      - name: Commit Updated PDFs and Manifest to GitHub
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "auto(sync): Update PDF standards & manifest hashes"
-          file_pattern: "pdf_store/*"

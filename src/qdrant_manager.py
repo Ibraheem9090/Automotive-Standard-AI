@@ -1,93 +1,133 @@
 import os
-import uuid
 from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+    PayloadSchemaType
+)
 
 class QdrantManager:
     def __init__(
         self, 
         url: Optional[str] = None, 
         api_key: Optional[str] = None, 
-        collection_name: Optional[str] = None,
-        vector_size: int = 2048  # Updated default to 2048 for nvidia/nemotron-3-embed-1b
+        collection_name: str = "automotive_standards"
     ):
         self.url = url or os.getenv("QDRANT_URL")
         self.api_key = api_key or os.getenv("QDRANT_API_KEY")
-        self.collection_name = collection_name or os.getenv("COLLECTION_NAME", "automotive_standards")
-        self.vector_size = vector_size
+        self.collection_name = collection_name
+        
+        # Initialize Qdrant Client
+        if self.url and self.api_key:
+            self.client = QdrantClient(url=self.url, api_key=self.api_key)
+        else:
+            print("[QdrantManager] Warning: QDRANT_URL or QDRANT_API_KEY missing. Using in-memory client.")
+            self.client = QdrantClient(":memory:")
 
-        if not self.url or not self.api_key:
-            raise ValueError("[QdrantManager Error] QDRANT_URL or QDRANT_API_KEY environment variable missing.")
+        self._ensure_collection()
 
-        self.client = QdrantClient(url=self.url, api_key=self.api_key)
-        self._ensure_collection_exists(vector_size=self.vector_size)
-
-    def _ensure_collection_exists(self, vector_size: int = 2048):
-        """
-        Ensures the target Qdrant collection exists (2048 dimensions for active NVIDIA NIM embedding models).
-        """
-        try:
-            if not self.client.collection_exists(collection_name=self.collection_name):
-                self.client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
-                )
-                print(f"[QdrantManager] Created collection '{self.collection_name}' with size {vector_size}.")
-        except Exception as e:
-            print(f"[QdrantManager Error] Collection check/creation failed: {e}")
-
-    def recreate_collection(self, vector_size: int = 2048):
-        """
-        Deletes and recreates the collection with updated vector dimensions (e.g. switching 4096 -> 2048).
-        """
-        try:
-            if self.client.collection_exists(collection_name=self.collection_name):
-                self.client.delete_collection(collection_name=self.collection_name)
-                print(f"[QdrantManager] Deleted existing collection '{self.collection_name}'.")
-
+    def _ensure_collection(self):
+        """Creates collection for 2048-dim vectors and registers payload indexes for fast filtering."""
+        collections = [col.name for col in self.client.get_collections().collections]
+        
+        if self.collection_name not in collections:
+            print(f"[QdrantManager] Creating collection '{self.collection_name}' (2048-dim, Cosine)...")
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
+                vectors_config=VectorParams(size=2048, distance=Distance.COSINE)
             )
-            print(f"[QdrantManager] Recreated collection '{self.collection_name}' with size {vector_size}.")
-        except Exception as e:
-            print(f"[QdrantManager Error] Collection recreation failed: {e}")
 
-    def upsert_document_points(self, doc_id: str, points: List[Dict[str, Any]]):
+        # Ensure payload indexes exist for metadata filtering
+        indexed_fields = ["standard_family", "process_id", "doc_id", "domain"]
+        for field in indexed_fields:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=PayloadSchemaType.KEYWORD
+                )
+            except Exception:
+                # Index likely already exists
+                pass
+
+    def upsert_points(self, points_data: List[Dict[str, Any]], batch_size: int = 100):
         """
-        Converts chunk payload points to PointStruct objects and upserts into Qdrant Cloud.
+        Upserts vector points in batches to handle large multi-page PDF indexing.
+        Accepts dicts formatted with 'id', 'vector', and 'payload'.
         """
-        qdrant_points = []
-        for item in points:
-            # Create a deterministic UUID for each page chunk point
-            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{doc_id}_page_{item['page_number']}"))
-            qdrant_points.append(
+        points = []
+        for item in points_data:
+            points.append(
                 PointStruct(
-                    id=point_id,
+                    id=item["id"],
                     vector=item["vector"],
                     payload=item["payload"]
                 )
             )
 
-        if qdrant_points:
+        # Batch upload to avoid request size limits in Qdrant Cloud
+        for i in range(0, len(points), batch_size):
+            batch = points[i : i + batch_size]
             self.client.upsert(
                 collection_name=self.collection_name,
-                points=qdrant_points
+                points=batch,
+                wait=True
             )
-            print(f"[QdrantManager] Upserted {len(qdrant_points)} vector points for doc '{doc_id}'.")
+        print(f"[QdrantManager] Successfully upserted {len(points)} points into '{self.collection_name}'.")
 
-    def search(self, query_vector: List[float], top_k: int = 4) -> List[Dict[str, Any]]:
+    def upsert_document_points(self, doc_id: str, points: List[Dict[str, Any]]):
+        """Alias method to maintain backward compatibility with ingestion pipeline calls."""
+        self.upsert_points(points_data=points)
+
+    def query_standards(
+        self, 
+        query_vector: List[float], 
+        standard_family: Optional[str] = None, 
+        process_id: Optional[str] = None,
+        doc_id: Optional[str] = None,
+        top_k: int = 5
+    ) -> List[Dict[str, Any]]:
         """
-        Searches Qdrant Cloud using modern query_points syntax (qdrant-client >= 1.11.0).
+        Executes vector similarity search with optional payload filters.
+        Supports standard family (AIS, UN_ECE, ASPICE), process ID (SYS.2), or specific doc ID.
         """
-        try:
-            response = self.client.query_points(
-                collection_name=self.collection_name,
-                query=query_vector,  # Uses 'query=' parameter required by current qdrant-client
-                limit=top_k
+        must_conditions = []
+        
+        if standard_family:
+            must_conditions.append(
+                FieldCondition(key="standard_family", match=MatchValue(value=standard_family))
             )
-            return [point.payload for point in response.points if point.payload is not None]
-        except Exception as e:
-            print(f"[QdrantManager Error] Search failed: {e}")
-            return []
+        if process_id:
+            must_conditions.append(
+                FieldCondition(key="process_id", match=MatchValue(value=process_id))
+            )
+        if doc_id:
+            must_conditions.append(
+                FieldCondition(key="doc_id", match=MatchValue(value=doc_id))
+            )
+
+        query_filter = Filter(must=must_conditions) if must_conditions else None
+
+        # Execute query points request
+        search_result = self.client.query_points(
+            collection_name=self.collection_name,
+            query=query_vector,
+            query_filter=query_filter,
+            limit=top_k,
+            with_payload=True
+        )
+
+        results = []
+        for point in search_result.points:
+            results.append({
+                "id": point.id,
+                "score": point.score,
+                "payload": point.payload
+            })
+
+        return results

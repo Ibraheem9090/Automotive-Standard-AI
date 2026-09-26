@@ -2,36 +2,29 @@ import os
 import requests
 from typing import List, Optional
 
-class NVIDIAClient:
+class NvidiaClient:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("NVIDIA_API_KEY")
-        self.embedding_url = "https://ai.api.nvidia.com/v1/retrieval/nvidia/nv-embed-v1/embeddings"
-        self.headers = {
+        self.embed_url = "https://integrate.api.nvidia.com/v1/embeddings"
+        self.llm_url = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+    def get_embedding(self, text: str) -> List[float]:
+        headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Accept": "application/json",
             "Content-Type": "application/json"
         }
-
-    def get_embedding(self, text: str) -> Optional[List[float]]:
-        """
-        Fetches text vector embeddings using NVIDIA NIM API (nvidia/nv-embed-v1).
-        """
-        if not self.api_key:
-            print("[NVIDIAClient Error] NVIDIA_API_KEY environment variable is missing.")
-            return None
-
-        # Truncate text input safely to fit model context
         payload = {
-            "input": [text[:2000]],
-            "model": "nvidia/nv-embed-v1",
+            "input": [text],
+            "model": "nvidia/nemotron-3-embed-1b",  # 2048 dimensions
             "input_type": "passage"
         }
-
         try:
-            response = requests.post(self.embedding_url, headers=self.headers, json=payload, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            return data["data"][0]["embedding"]
+            res = requests.post(self.embed_url, json=payload, headers=headers, timeout=30)
+            if res.status_code == 200:
+                return res.json()["data"][0]["embedding"]
+            else:
+                print(f"[NvidiaClient Error] {res.status_code}: {res.text}")
+                return []
         except Exception as e:
-            print(f"[NVIDIAClient Error] Failed to generate embedding: {e}")
-            return None
+            print(f"[NvidiaClient Exception] {e}")
+            return []
