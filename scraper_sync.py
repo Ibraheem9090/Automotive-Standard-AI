@@ -3,12 +3,16 @@ import re
 import json
 import hashlib
 import requests
-import fitz  # PyMuPDF
+import pymupdf as fitz  # Updated import to eliminate deprecation warning
+import urllib3
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
+
+# Suppress SSL certificate verification warnings for ARAI scraper
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==========================================
 # 1. Configuration & Client Setup
@@ -77,7 +81,7 @@ def fetch_ais_pdf_links() -> list[dict]:
     pdf_entries = []
     visited_urls = set()
 
-    # Crawl main AIS downloads page and up to 10 paginated pages if present
+    # Crawl main AIS downloads page and paginated pages
     pages_to_crawl = [AIS_BASE_URL]
     for page_idx in range(1, 10):
         pages_to_crawl.append(f"{AIS_BASE_URL}?page={page_idx}")
@@ -90,7 +94,8 @@ def fetch_ais_pdf_links() -> list[dict]:
         visited_urls.add(url)
 
         try:
-            resp = requests.get(url, headers=headers, timeout=15)
+            # Added verify=False to handle ARAI's local SSL issuer issue
+            resp = requests.get(url, headers=headers, timeout=15, verify=False)
             if resp.status_code != 200:
                 continue
 
@@ -103,18 +108,14 @@ def fetch_ais_pdf_links() -> list[dict]:
 
                 if href.lower().endswith(".pdf"):
                     full_pdf_url = urljoin(url, href)
-
-                    # Strict AIS Validation Rule
                     combined_str = f"{full_pdf_url.lower()} {link_text.lower()}"
                     
                     # Exclude non-standard documents
                     if any(junk in combined_str for junk in ["annual", "report", "spandan", "newsletter", "tender", "career"]):
                         continue
 
-                    # Require explicit AIS tag or ARAI downloads origin
+                    # Match AIS document patterns
                     if re.search(r"ais[-\_]?\d+", combined_str) or "/downloads/" in full_pdf_url.lower():
-                        
-                        # Extract clean Document ID (e.g. AIS-156)
                         doc_match = re.search(r"(AIS[-\_]?\d+(?:\s?\(Part\s?\d+\))?)", combined_str, re.IGNORECASE)
                         doc_id = doc_match.group(1).upper().replace("_", "-") if doc_match else "AIS-STANDARD"
 
@@ -198,7 +199,6 @@ def run_sync():
         pdf_url = item["url"]
         doc_id = item["doc_id"]
         
-        # Clean filename formatting
         filename = re.sub(r"[^\w\-.]", "_", os.path.basename(pdf_url))
         if not filename.endswith(".pdf"):
             filename += ".pdf"
@@ -206,30 +206,25 @@ def run_sync():
         local_filepath = os.path.join(PDF_STORE_DIR, filename)
 
         try:
-            # Download PDF
             print(f"[Downloading] {doc_id} from {pdf_url}...")
-            resp = requests.get(pdf_url, timeout=30)
+            resp = requests.get(pdf_url, timeout=30, verify=False)
             if resp.status_code != 200:
                 continue
 
             with open(local_filepath, "wb") as f:
                 f.write(resp.content)
 
-            # Compute SHA-256 Delta Hash
             file_hash = calculate_sha256(local_filepath)
 
             if manifest.get(filename) == file_hash:
                 print(f"[Skip] {filename} is unchanged (SHA-256 match).")
                 continue
 
-            # Compute raw GitHub URL for visual rendering in app.py
             github_user = os.getenv("GITHUB_REPOSITORY", "Ibraheem9090/Automotive-Standard-AI")
             raw_github_url = f"https://raw.githubusercontent.com/{github_user}/main/{PDF_STORE_DIR}/{filename}"
 
-            # Extract & Index into Qdrant Cloud
             process_and_index_pdf(local_filepath, doc_id, raw_github_url)
 
-            # Update manifest entry
             manifest[filename] = file_hash
             new_download_count += 1
 
