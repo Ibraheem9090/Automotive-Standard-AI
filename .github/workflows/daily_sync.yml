@@ -1,22 +1,21 @@
-name: Daily Standards Sync
+name: Standards Sync Pipeline
 
 on:
+  push:
+    branches: [ main ]
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 0 * * 0' # Run weekly on Sunday
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
@@ -24,17 +23,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          playwright install chromium
 
-      - name: Run Standards Sync Scraper
+      - name: Run Playwright Scraper
+        run: python arai_scraper.py
+
+      - name: Run Standards Sync Scraper & Indexer
         env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-        run: |
-          python scraper_sync.py
+        run: python scraper_sync.py
 
-      - name: Commit and Push Downloaded PDFs
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore(data): auto-sync scraped PDFs to pdf_store"
-          file_pattern: "pdf_store/*"
+      - name: Commit and Push Updated Manifest & Files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add pdf_store/
+          git commit -m "chore(data): sync scraped standards to store" || echo "No changes to commit"
+          git push

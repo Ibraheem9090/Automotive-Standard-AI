@@ -1,7 +1,8 @@
 streamlit
-pymupdf
-pillow
-requests
 qdrant-client
 openai
-beautifulsoup4
+pymupdf
+python-docx
+playwright
+requests
+urllib3

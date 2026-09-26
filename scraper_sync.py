@@ -2,50 +2,32 @@ import os
 import re
 import json
 import hashlib
-import requests
-import urllib3
-import pymupdf as fitz
-from urllib.parse import urljoin
-from bs4 import BeautifulSoup
+import docx  # python-docx for .docx files
+import pymupdf as fitz  # PyMuPDF for .pdf files
 from openai import OpenAI
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 
-# Suppress insecure HTTPS request warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import subprocess
+import os
 
-# ==========================================
-# 1. Configuration & Setup
-# ==========================================
+def convert_doc_to_pdf(doc_path: str):
+    """Converts .doc / .docx files to .pdf using headless LibreOffice."""
+    output_dir = os.path.dirname(doc_path)
+    try:
+        subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "pdf", doc_path, "--outdir", output_dir],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        print(f"[Conversion Success] Converted {os.path.basename(doc_path)} to PDF.")
+    except Exception as e:
+        print(f"[Conversion Error] Could not convert {doc_path} to PDF: {e}")
+
 PDF_STORE_DIR = "pdf_store"
 MANIFEST_FILE = os.path.join(PDF_STORE_DIR, "standards_manifest.json")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "automotive_standards")
-ARAI_BASE_URL = "https://araiindia.com"
-ARAI_DOWNLOADS_URL = "https://araiindia.com/downloads"
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
-
-# Direct remote PDF sources for core AIS standards
-REMOTE_AIS_CATALOG = [
-    {
-        "doc_id": "AIS-156",
-        "url": "https://morth.gov.in/sites/default/files/AIS-156.pdf"
-    },
-    {
-        "doc_id": "AIS-038-REV2",
-        "url": "https://morth.gov.in/sites/default/files/AIS-038-Rev2.pdf"
-    },
-    {
-        "doc_id": "AIS-037",
-        "url": "https://morth.gov.in/sites/default/files/AIS-037.pdf"
-    },
-    {
-        "doc_id": "AIS-007",
-        "url": "https://morth.gov.in/sites/default/files/AIS-007.pdf"
-    }
-]
 
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")
@@ -56,9 +38,6 @@ os.makedirs(PDF_STORE_DIR, exist_ok=True)
 nvidia_client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY) if NVIDIA_API_KEY else None
 qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY) if (QDRANT_URL and QDRANT_API_KEY) else None
 
-# ==========================================
-# 2. Helpers
-# ==========================================
 def load_manifest() -> dict:
     if os.path.exists(MANIFEST_FILE):
         try:
@@ -89,6 +68,16 @@ def ensure_qdrant_collection():
             collection_name=COLLECTION_NAME,
             vectors_config=VectorParams(size=2048, distance=Distance.COSINE)
         )
+    
+    for field in ["standard_family", "doc_id"]:
+        try:
+            qdrant_client.create_payload_index(
+                collection_name=COLLECTION_NAME,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD
+            )
+        except Exception:
+            pass
 
 def get_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
@@ -99,21 +88,57 @@ def get_embedding(text: str) -> list[float]:
     )
     return response.data[0].embedding
 
-def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
+def extract_chunks_from_file(file_path: str) -> list[tuple[int, str]]:
+    """Extracts text chunks from PDF, DOCX, and legacy DOC files."""
+    ext = os.path.splitext(file_path)[1].lower()
+    chunks = []
+
+    if ext == ".pdf":
+        doc = fitz.open(file_path)
+        for page_num in range(len(doc)):
+            page_text = doc[page_num].get_text("text").strip()
+            if page_text and len(page_text) >= 50:
+                chunks.append((page_num + 1, page_text))
+
+    elif ext == ".docx":
+        doc = docx.Document(file_path)
+        paragraphs = [p.text.strip() for p in doc.paragraphs if len(p.text.strip()) > 30]
+        # Group paragraphs into 5-paragraph chunks to mimic pages
+        chunk_size = 5
+        for i in range(0, len(paragraphs), chunk_size):
+            chunk_text = "\n".join(paragraphs[i:i + chunk_size])
+            chunks.append((i // chunk_size + 1, chunk_text))
+
+    elif ext == ".doc":
+        # Attempt docx parsing first (some .doc files are OpenXML)
+        try:
+            doc = docx.Document(file_path)
+            paragraphs = [p.text.strip() for p in doc.paragraphs if len(p.text.strip()) > 30]
+            chunk_size = 5
+            for i in range(0, len(paragraphs), chunk_size):
+                chunk_text = "\n".join(paragraphs[i:i + chunk_size])
+                chunks.append((i // chunk_size + 1, chunk_text))
+        except Exception:
+            # Fallback binary string extraction for legacy Word streams
+            with open(file_path, "rb") as f:
+                content = f.read()
+            raw_strings = re.findall(rb'[a-zA-Z0-9\s\.,;:()\-\n]{30,}', content)
+            clean_text = "\n".join([s.decode('utf-8', errors='ignore') for s in raw_strings])
+            if clean_text:
+                chunks.append((1, clean_text))
+
+    return chunks
+
+def process_and_index_file(filepath: str, doc_id: str, raw_github_url: str):
     if not (nvidia_client and qdrant_client):
-        print("[Warning] API clients not fully initialized. Skipping indexing.")
         return
 
-    doc = fitz.open(pdf_path)
+    chunks = extract_chunks_from_file(filepath)
     points = []
 
-    for page_num in range(len(doc)):
-        page_text = doc[page_num].get_text("text").strip()
-        if not page_text or len(page_text) < 50:
-            continue
-
-        vector = get_embedding(page_text)
-        point_id = hashlib.md5(f"{doc_id}_p{page_num+1}_{os.path.basename(pdf_path)}".encode()).hexdigest()
+    for chunk_num, text_content in chunks:
+        vector = get_embedding(text_content)
+        point_id = hashlib.md5(f"{doc_id}_c{chunk_num}_{os.path.basename(filepath)}".encode()).hexdigest()
 
         points.append(
             PointStruct(
@@ -122,8 +147,8 @@ def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
                 payload={
                     "doc_id": doc_id,
                     "standard_family": "AIS",
-                    "page_number": page_num + 1,
-                    "text": page_text,
+                    "page_number": chunk_num,
+                    "text": text_content,
                     "github_raw_url": raw_github_url
                 }
             )
@@ -131,11 +156,8 @@ def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
 
     if points:
         qdrant_client.upsert(collection_name=COLLECTION_NAME, points=points)
-        print(f"[Qdrant] Indexed {len(points)} page vectors for {doc_id}.")
+        print(f"[Qdrant] Indexed {len(points)} text vectors for {doc_id}.")
 
-# ==========================================
-# 3. Main Sync Pipeline
-# ==========================================
 def run_sync():
     ensure_qdrant_collection()
     manifest = load_manifest()
@@ -143,61 +165,30 @@ def run_sync():
 
     github_user = os.getenv("GITHUB_REPOSITORY", "Ibraheem9090/Automotive-Standard-AI")
 
-    # PHASE 1: Index local PDFs inside pdf_store/
-    print("[Sync Engine] Phase 1: Checking local pdf_store/ for files...")
-    local_files = [f for f in os.listdir(PDF_STORE_DIR) if f.lower().endswith(".pdf")]
+    print("[Sync Engine] Scanning local pdf_store/ for files (.pdf, .docx, .doc)...")
+    valid_extensions = (".pdf", ".docx", ".doc")
+    local_files = [f for f in os.listdir(PDF_STORE_DIR) if f.lower().endswith(valid_extensions)]
 
     for filename in local_files:
         local_filepath = os.path.join(PDF_STORE_DIR, filename)
         file_hash = calculate_sha256(local_filepath)
 
         if manifest.get(filename) == file_hash:
-            print(f"[Skip] {filename} is already indexed.")
             continue
 
         doc_match = re.search(r"(AIS[-\_]?\d+)", filename, re.IGNORECASE)
-        doc_id = doc_match.group(1).upper().replace("_", "-") if doc_match else filename.replace(".pdf", "")
+        doc_id = doc_match.group(1).upper().replace("_", "-") if doc_match else os.path.splitext(filename)[0]
 
         raw_github_url = f"https://raw.githubusercontent.com/{github_user}/main/{PDF_STORE_DIR}/{filename}"
 
-        print(f"[Local PDF] Processing & Indexing: {filename} ({doc_id})")
-        process_and_index_pdf(local_filepath, doc_id, raw_github_url)
+        print(f"[Processing File] {filename} ({doc_id})")
+        process_and_index_file(local_filepath, doc_id, raw_github_url)
 
         manifest[filename] = file_hash
         processed_count += 1
 
-    # PHASE 2: Fetch Remote AIS Standards Catalog
-    print("[Sync Engine] Phase 2: Downloading remote AIS standards catalog...")
-    for item in REMOTE_AIS_CATALOG:
-        doc_id = item["doc_id"]
-        pdf_url = item["url"]
-        filename = f"{doc_id}.pdf"
-        local_filepath = os.path.join(PDF_STORE_DIR, filename)
-
-        try:
-            print(f"[Remote PDF] Downloading {doc_id} from {pdf_url}...")
-            res = requests.get(pdf_url, headers=HEADERS, verify=False, timeout=30)
-
-            if res.status_code == 200 and len(res.content) > 1000:
-                with open(local_filepath, "wb") as f:
-                    f.write(res.content)
-
-                file_hash = calculate_sha256(local_filepath)
-
-                if manifest.get(filename) != file_hash:
-                    raw_github_url = f"https://raw.githubusercontent.com/{github_user}/main/{PDF_STORE_DIR}/{filename}"
-                    process_and_index_pdf(local_filepath, doc_id, raw_github_url)
-                    manifest[filename] = file_hash
-                    processed_count += 1
-                else:
-                    print(f"[Skip] {filename} is unchanged.")
-            else:
-                print(f"[Warning] Failed to fetch {pdf_url} (Status: {res.status_code})")
-        except Exception as e:
-            print(f"[Error] Failed downloading remote AIS PDF ({doc_id}): {e}")
-
     save_manifest(manifest)
-    print(f"\n[Sync Complete] Successfully processed and indexed {processed_count} AIS Standard PDF(s).")
+    print(f"\n[Sync Complete] Successfully processed and indexed {processed_count} Standard file(s).")
 
 if __name__ == "__main__":
     run_sync()
