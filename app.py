@@ -6,6 +6,7 @@ import streamlit as st
 from PIL import Image
 from openai import OpenAI
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 # ==========================================
 # 1. Page Configuration & Setup
@@ -69,15 +70,37 @@ def get_embedding(text: str) -> list[float] | None:
         st.error(f"Error generating embedding from NVIDIA NIM API: {e}")
         return None
 
-def search_qdrant(query_vector: list[float], top_k: int = 4):
-    """Searches Qdrant Cloud for matching standard chunks."""
+def search_qdrant(
+    query_vector: list[float], 
+    top_k: int = 4,
+    standard_family: str | None = None,
+    process_id: str | None = None,
+    doc_id: str | None = None
+) -> list[dict]:
+    """Searches Qdrant Cloud for matching standard chunks with metadata filter support."""
     try:
+        must_conditions = []
+        if standard_family and standard_family != "All Standards":
+            must_conditions.append(
+                FieldCondition(key="standard_family", match=MatchValue(value=standard_family))
+            )
+        if process_id and process_id.strip():
+            must_conditions.append(
+                FieldCondition(key="process_id", match=MatchValue(value=process_id.strip()))
+            )
+        if doc_id and doc_id.strip():
+            must_conditions.append(
+                FieldCondition(key="doc_id", match=MatchValue(value=doc_id.strip()))
+            )
+
+        query_filter = Filter(must=must_conditions) if must_conditions else None
+
         response = qdrant_client.query_points(
             collection_name=COLLECTION_NAME,
-            query=query_vector,  # Use 'query=', NOT 'query_vector='
+            query=query_vector,
+            query_filter=query_filter,
             limit=top_k
         )
-        # Extract payload from points in the QueryResponse
         return [point.payload for point in response.points]
     except Exception as e:
         st.error(f"Error querying Qdrant Cloud: {e}")
@@ -135,7 +158,7 @@ if "chat_history" not in st.session_state:
 if "active_pdf_pages" not in st.session_state:
     st.session_state.active_pdf_pages = []
 
-# Sidebar
+# Sidebar Configuration & Dynamic Filtering
 with st.sidebar:
     st.title("⚙️ System Status")
     st.info("👨‍💻 Creator: **Ibraheem**")
@@ -143,10 +166,19 @@ with st.sidebar:
     st.success("🟢 Cloud Connected")
     st.divider()
     
+    st.markdown("### 🔍 Regulatory & Scope Filters")
+    selected_family = st.selectbox(
+        "Standard Family",
+        ["All Standards", "AIS", "UNECE", "AUTOSAR", "ASAM", "ASPICE", "FMVSS"]
+    )
+    selected_process = st.text_input("Process ID (e.g. SYS.2, SWE.1)", value="")
+    selected_doc_id = st.text_input("Document ID (e.g. AIS-156)", value="")
+
+    st.divider()
     st.markdown("### 🔍 Quick Features")
-    st.markdown("- **Multimodal Context:** Text + Page Images")
-    st.markdown("- **SHA-256 Sync:** Skips unchanged files")
-    st.markdown("- **Targeted Retrieval:** Page-level citation")
+    st.markdown("* **Multimodal Context:** Text + Page Images")
+    st.markdown("* **SHA-256 Sync:** Skips unchanged files")
+    st.markdown("* **Targeted Retrieval:** Page-level citation")
     
     if st.button("Clear Chat History", use_container_width=True):
         st.session_state.chat_history = []
@@ -181,10 +213,16 @@ with col_chat:
                     answer = "Failed to generate embedding for your query. Please verify API key configuration."
                     st.session_state.active_pdf_pages = []
                 else:
-                    retrieved_chunks = search_qdrant(query_vec, top_k=3)
+                    retrieved_chunks = search_qdrant(
+                        query_vector=query_vec,
+                        top_k=3,
+                        standard_family=selected_family,
+                        process_id=selected_process,
+                        doc_id=selected_doc_id
+                    )
                     
                     if not retrieved_chunks:
-                        answer = "No relevant standard specifications found in Qdrant database."
+                        answer = "No relevant standard specifications found matching your query and filter criteria."
                         st.session_state.active_pdf_pages = []
                     else:
                         answer = generate_answer(user_query, retrieved_chunks)
