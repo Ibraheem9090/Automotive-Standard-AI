@@ -132,8 +132,8 @@ if st.sidebar.button("Clear Chat History", use_container_width=True):
 # ==========================================
 # MAIN APPLICATION CHAT INTERFACE
 # ==========================================
-st.title("🚗 Automotive Standards AI Assistant")
-st.caption("Retrieve and query compliance specifications across AIS automotive standards.")
+st.title("Automotive Standards AI Assistant")
+st.caption("Retrieve and query compliance specifications across AIS automotive standards- Edu use only."- Developed by Ibraheem)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
