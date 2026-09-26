@@ -36,7 +36,7 @@ nvidia_client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=N
 qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY) if (QDRANT_URL and QDRANT_API_KEY) else None
 
 # ==========================================
-# 2. Helper Functions
+# 2. Helpers
 # ==========================================
 def load_manifest() -> dict:
     if os.path.exists(MANIFEST_FILE):
@@ -80,6 +80,7 @@ def get_embedding(text: str) -> list[float]:
 
 def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
     if not (nvidia_client and qdrant_client):
+        print("[Warning] API clients not fully initialized. Skipping indexing.")
         return
 
     doc = fitz.open(pdf_path)
@@ -91,7 +92,7 @@ def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
             continue
 
         vector = get_embedding(page_text)
-        point_id = hashlib.md5(f"{doc_id}_p{page_num+1}_{pdf_path}".encode()).hexdigest()
+        point_id = hashlib.md5(f"{doc_id}_p{page_num+1}_{os.path.basename(pdf_path)}".encode()).hexdigest()
 
         points.append(
             PointStruct(
@@ -109,74 +110,88 @@ def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
 
     if points:
         qdrant_client.upsert(collection_name=COLLECTION_NAME, points=points)
-        print(f"[Qdrant] Successfully indexed {len(points)} page vectors for {doc_id}.")
+        print(f"[Qdrant] Indexed {len(points)} page vectors for {doc_id}.")
 
 # ==========================================
-# 3. Main Sync Logic
+# 3. Main Pipeline
 # ==========================================
 def run_sync():
     ensure_qdrant_collection()
     manifest = load_manifest()
+    processed_count = 0
+
+    github_user = os.getenv("GITHUB_REPOSITORY", "Ibraheem9090/Automotive-Standard-AI")
+
+    # PHASE 1: Index existing local PDFs in pdf_store/
+    print("[Sync Engine] Phase 1: Checking local pdf_store/ for files...")
+    local_files = [f for f in os.listdir(PDF_STORE_DIR) if f.lower().endswith(".pdf")]
     
-    print(f"[Sync Engine] Fetching catalog from: {ARAI_DOWNLOADS_URL}")
+    for filename in local_files:
+        local_filepath = os.path.join(PDF_STORE_DIR, filename)
+        file_hash = calculate_sha256(local_filepath)
+
+        if manifest.get(filename) == file_hash:
+            continue
+
+        doc_match = re.search(r"(AIS[-\_]?\d+)", filename, re.IGNORECASE)
+        doc_id = doc_match.group(1).upper().replace("_", "-") if doc_match else filename.replace(".pdf", "")
+
+        raw_github_url = f"https://raw.githubusercontent.com/{github_user}/main/{PDF_STORE_DIR}/{filename}"
+        
+        print(f"[Local PDF] Processing & Indexing: {filename} ({doc_id})")
+        process_and_index_pdf(local_filepath, doc_id, raw_github_url)
+
+        manifest[filename] = file_hash
+        processed_count += 1
+
+    # PHASE 2: Scrape web catalog for new standards
+    print(f"[Sync Engine] Phase 2: Fetching web catalog from {ARAI_DOWNLOADS_URL}...")
     try:
         res = requests.get(ARAI_DOWNLOADS_URL, headers=HEADERS, verify=False, timeout=20)
-        if res.status_code != 200:
-            print(f"[Error] Failed to reach {ARAI_DOWNLOADS_URL}")
-            return
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            rows = soup.find_all("tr")
 
-        soup = BeautifulSoup(res.text, "html.parser")
-        links = soup.find_all("a", href=True)
-        
-        ais_candidates = []
-        for link in links:
-            href = link["href"].strip()
-            text = link.get_text(strip=True)
-            full_str = f"{href} {text}".lower()
+            for row in rows:
+                row_text = row.get_text(" ", strip=True)
+                
+                # Exclude administrative files
+                if any(j in row_text.lower() for j in ["annual report", "poster", "defaulter", "5yrplan"]):
+                    continue
 
-            # Strict check: Must be a PDF and contain explicit 'ais' standard designation
-            if href.lower().endswith(".pdf") and "ais" in full_str:
-                # Exclude administrative keywords
-                if not any(junk in full_str for junk in ["annual", "report", "poster", "defaulter", "plan"]):
-                    full_url = urljoin(ARAI_DOWNLOADS_URL, href)
+                if "ais" in row_text.lower():
+                    link = row.find("a", href=True)
+                    if not link:
+                        continue
                     
-                    doc_match = re.search(r"(AIS[-\_]?\d+)", full_str, re.IGNORECASE)
+                    href = link["href"].strip()
+                    pdf_url = urljoin(ARAI_DOWNLOADS_URL, href)
+
+                    doc_match = re.search(r"(AIS[-\_]?\d+)", row_text, re.IGNORECASE)
                     doc_id = doc_match.group(1).upper().replace("_", "-") if doc_match else "AIS-STANDARD"
-                    
-                    ais_candidates.append({"doc_id": doc_id, "url": full_url})
 
-        print(f"[Sync Engine] Found {len(ais_candidates)} matching AIS PDF links.")
+                    filename = f"{doc_id}.pdf"
+                    local_filepath = os.path.join(PDF_STORE_DIR, filename)
 
-        downloaded_count = 0
-        for item in ais_candidates:
-            pdf_url = item["url"]
-            doc_id = item["doc_id"]
-            
-            filename = os.path.basename(pdf_url.split("?")[0])
-            filename = re.sub(r"[^\w\-.]", "_", filename)
-            local_filepath = os.path.join(PDF_STORE_DIR, filename)
+                    print(f"[Downloading Web PDF] {doc_id} -> {pdf_url}")
+                    pdf_res = requests.get(pdf_url, headers=HEADERS, verify=False, timeout=30)
 
-            print(f"[Downloading] {doc_id} -> {pdf_url}")
-            pdf_res = requests.get(pdf_url, headers=HEADERS, verify=False, timeout=30)
-            
-            if pdf_res.status_code == 200 and len(pdf_res.content) > 1000:
-                with open(local_filepath, "wb") as f:
-                    f.write(pdf_res.content)
+                    if pdf_res.status_code == 200 and len(pdf_res.content) > 1000:
+                        with open(local_filepath, "wb") as f:
+                            f.write(pdf_res.content)
 
-                file_hash = calculate_sha256(local_filepath)
-                github_user = os.getenv("GITHUB_REPOSITORY", "Ibraheem9090/Automotive-Standard-AI")
-                raw_github_url = f"https://raw.githubusercontent.com/{github_user}/main/{PDF_STORE_DIR}/{filename}"
+                        file_hash = calculate_sha256(local_filepath)
+                        raw_github_url = f"https://raw.githubusercontent.com/{github_user}/main/{PDF_STORE_DIR}/{filename}"
 
-                process_and_index_pdf(local_filepath, doc_id, raw_github_url)
-
-                manifest[filename] = file_hash
-                downloaded_count += 1
-
-        save_manifest(manifest)
-        print(f"\n[Sync Complete] Successfully processed {downloaded_count} AIS Standard PDF(s).")
-
+                        if manifest.get(filename) != file_hash:
+                            process_and_index_pdf(local_filepath, doc_id, raw_github_url)
+                            manifest[filename] = file_hash
+                            processed_count += 1
     except Exception as e:
-        print(f"[Error] Pipeline execution failed: {e}")
+        print(f"[Sync Engine Warning] Crawler run encountered error: {e}")
+
+    save_manifest(manifest)
+    print(f"\n[Sync Complete] Successfully processed and indexed {processed_count} AIS Standard PDF(s).")
 
 if __name__ == "__main__":
     run_sync()
