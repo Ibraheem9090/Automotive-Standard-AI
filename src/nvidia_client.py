@@ -1,30 +1,23 @@
 import os
-import requests
-from typing import List, Optional
+from openai import OpenAI
 
-class NvidiaClient:
-    def __init__(self, api_key: Optional[str] = None):
+class NVIDIAClient:
+    def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.getenv("NVIDIA_API_KEY")
-        self.embed_url = "https://integrate.api.nvidia.com/v1/embeddings"
-        self.llm_url = "https://integrate.api.nvidia.com/v1/chat/completions"
+        if not self.api_key:
+            raise ValueError("NVIDIA_API_KEY environment variable or argument is missing.")
+        
+        self.client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=self.api_key
+        )
 
-    def get_embedding(self, text: str) -> List[float]:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "input": [text],
-            "model": "nvidia/nemotron-3-embed-1b",  # 2048 dimensions
-            "input_type": "passage"
-        }
-        try:
-            res = requests.post(self.embed_url, json=payload, headers=headers, timeout=30)
-            if res.status_code == 200:
-                return res.json()["data"][0]["embedding"]
-            else:
-                print(f"[NvidiaClient Error] {res.status_code}: {res.text}")
-                return []
-        except Exception as e:
-            print(f"[NvidiaClient Exception] {e}")
-            return []
+    def get_embedding(self, text: str) -> list[float]:
+        """Generates embeddings using NVIDIA NIM API."""
+        response = self.client.embeddings.create(
+            input=[text],
+            model="nvidia/nemotron-3-embed-1b",
+            encoding_format="float",
+            extra_body={"input_type": "passage"}
+        )
+        return response.data[0].embedding
