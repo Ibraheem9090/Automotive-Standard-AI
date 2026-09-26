@@ -32,7 +32,6 @@ QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 os.makedirs(PDF_STORE_DIR, exist_ok=True)
 
-# Initialize API clients if available
 nvidia_client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=NVIDIA_API_KEY) if NVIDIA_API_KEY else None
 qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY) if (QDRANT_URL and QDRANT_API_KEY) else None
 
@@ -60,37 +59,7 @@ def calculate_sha256(filepath: str) -> str:
     return sha.hexdigest()
 
 # ==========================================
-# 3. AIS Standard Document Filter
-# ==========================================
-def is_valid_ais_pdf(url: str, link_text: str) -> bool:
-    """Strictly evaluates if a link belongs to an AIS automotive standard document."""
-    combined = f"{url.lower()} {link_text.lower()}"
-
-    # Must be a PDF link
-    if ".pdf" not in combined:
-        return False
-
-    # Block non-standard junk documents
-    junk_keywords = [
-        "annual", "report", "spandan", "newsletter", "tender", 
-        "career", "privacy", "policy", "form", "balance", 
-        "financial", "audited", "pension", "roster"
-    ]
-    if any(junk in combined for junk in junk_keywords):
-        return False
-
-    # Accept if explicit AIS standard patterns exist
-    ais_patterns = [
-        r"ais[-\_\s]?\d+",       # AIS-156, AIS_038, AIS 037, etc.
-        r"draft[-\_\s]?ais",      # Draft AIS
-        r"amendment",            # Standard amendments
-        r"tac"                   # Type Approval
-    ]
-    
-    return any(re.search(pattern, combined) for pattern in ais_patterns)
-
-# ==========================================
-# 4. Vector Embedding & Qdrant Indexing
+# 3. Vector Embedding & Qdrant Indexing
 # ==========================================
 def get_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
@@ -146,7 +115,7 @@ def process_and_index_pdf(pdf_path: str, doc_id: str, raw_github_url: str):
         print(f"[Qdrant] Indexed {len(points)} page vectors for {doc_id}.")
 
 # ==========================================
-# 5. Main Scraper Pipeline
+# 4. Main Scraper Pipeline
 # ==========================================
 def run_sync():
     print(f"[Sync Engine] Fetching catalog from: {ARAI_DOWNLOADS_URL}")
@@ -167,26 +136,38 @@ def run_sync():
 
         for link in links:
             href = link["href"].strip()
-            link_text = link.get_text(strip=True)
+            
+            # Inspect parent table row (tr) or container block for context
+            parent_row = link.find_parent("tr")
+            row_text = parent_row.get_text(" ", strip=True) if parent_row else link.get_text(strip=True)
+            combined_context = f"{href.lower()} {row_text.lower()}"
 
-            if is_valid_ais_pdf(href, link_text):
+            # Must be a PDF file link
+            if not href.lower().endswith(".pdf") and ".pdf" not in href.lower():
+                continue
+
+            # Exclude non-standard documents
+            junk_keywords = ["annual", "report", "spandan", "newsletter", "tender", "career", "privacy", "balance", "financial", "pension"]
+            if any(junk in combined_context for junk in junk_keywords):
+                continue
+
+            # Check if AIS or standard keywords exist anywhere in the row text or URL
+            is_ais = bool(re.search(r"ais[-\_\s]?\d+", combined_context) or "standard" in combined_context or "draft" in combined_context or "amendment" in combined_context)
+
+            if is_ais:
                 pdf_url = urljoin(ARAI_DOWNLOADS_URL, href)
                 
-                # Extract clean AIS Doc ID (e.g., AIS-156)
-                doc_match = re.search(r"(AIS[-\_]?\d+(?:\s?\(Part\s?\d+\))?)", f"{pdf_url} {link_text}", re.IGNORECASE)
+                # Extract clean AIS Document ID (e.g., AIS-156)
+                doc_match = re.search(r"(AIS[-\_]?\d+(?:\s?\(Part\s?\d+\))?)", row_text, re.IGNORECASE)
                 doc_id = doc_match.group(1).upper().replace("_", "-") if doc_match else "AIS-STANDARD"
 
-                # Standardize filename
+                # Generate clean filename
                 filename = os.path.basename(pdf_url.split("?")[0])
                 if not filename.endswith(".pdf"):
                     filename += ".pdf"
                 filename = re.sub(r"[^\w\-.]", "_", filename)
 
                 local_filepath = os.path.join(PDF_STORE_DIR, filename)
-
-                if os.path.exists(local_filepath):
-                    print(f"[Skip] {filename} already exists locally.")
-                    continue
 
                 print(f"[Downloading AIS Standard] {doc_id} -> {pdf_url}")
                 pdf_res = requests.get(pdf_url, headers=HEADERS, verify=False, timeout=30)
