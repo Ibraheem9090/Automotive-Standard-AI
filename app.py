@@ -228,7 +228,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                     )
 
                     response = nvidia_client.chat.completions.create(
-                        model="meta/llama-3.1-70b-instruct",
+                        model="meta/llama-3.2-11b-vision-instruct",
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_query}
