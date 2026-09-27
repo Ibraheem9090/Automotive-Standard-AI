@@ -106,8 +106,9 @@ def build_qdrant_filter(doc_id: str = "", process_id: str = "") -> Filter | None
     return Filter(must=must_conditions)
 
 # ==========================================
+# =========================================================
 # SIDEBAR / SYSTEM CONTROL
-# ==========================================
+# =========================================================
 st.sidebar.title("⚙️ System Control")
 
 # Clean Status Indicator
@@ -118,16 +119,15 @@ else:
 
 st.sidebar.divider()
 
-# Internal Developer Settings (Collapsed by default so clean for end users)
-with st.sidebar.expander("🛠️ Developer / Debug Filters", expanded=False):
-    process_id = st.text_input("Process ID (e.g., SYS.2)", value="").strip()
-    doc_id = st.text_input("Document ID Filter (e.g., AIS-156)", value="").strip()
-    retrieval_depth = st.slider("Retrieval Depth (Top Chunks)", min_value=1, max_value=20, value=8)
-
-st.sidebar.divider()
-if st.sidebar.button("Clear Chat History", use_container_width=True):
+# Primary Chat Action
+if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
     st.session_state.messages = []
     st.rerun()
+
+# Default RAG search parameters (replaces user input fields)
+retrieval_depth = 5
+doc_id = None
+process_id = None
 
 # ==========================================
 # MAIN APPLICATION CHAT INTERFACE
