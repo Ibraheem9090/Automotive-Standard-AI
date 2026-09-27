@@ -159,7 +159,7 @@ for message in st.session_state.messages:
                     with col_img:
                         img_bytes = render_pdf_page_image(src['doc_id'], src['page_number'])
                         if img_bytes:
-                            st.image(img_bytes, caption=f"Visual Page {src['page_number']} of {src['doc_id']}", use_column_width=True)
+                            st.image(img_bytes, caption=f"Visual Page {src['page_number']} of {src['doc_id']}", use_container_width=True)
                         else:
                             st.info("Visual page preview unavailable (non-PDF or file not found locally).")
                     
@@ -259,7 +259,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                                 with col_img:
                                     img_bytes = render_pdf_page_image(src['doc_id'], src['page_number'])
                                     if img_bytes:
-                                        st.image(img_bytes, caption=f"Visual Page {src['page_number']} of {src['doc_id']}", use_column_width=True)
+                                        st.image(img_bytes, caption=f"Visual Page {src['page_number']} of {src['doc_id']}", use_container_width=True)
                                     else:
                                         st.info("Visual page preview unavailable for this item.")
                                 
