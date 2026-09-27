@@ -180,14 +180,24 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                     # 1. Embed Query
                     query_vector = get_query_embedding(user_query)
 
-                    # 2. Search Qdrant
+                    # 2. Search Qdrant (Supports both new and legacy qdrant-client versions)
                     search_filter = build_qdrant_filter(doc_id=doc_id, process_id=process_id)
-                    search_results = qdrant_client.search(
-                        collection_name=COLLECTION_NAME,
-                        query_vector=query_vector,
-                        query_filter=search_filter,
-                        limit=retrieval_depth
-                    )
+                    
+                    if hasattr(qdrant_client, "query_points"):
+                        response = qdrant_client.query_points(
+                            collection_name=COLLECTION_NAME,
+                            query=query_vector,
+                            query_filter=search_filter,
+                            limit=retrieval_depth
+                        )
+                        search_results = response.points
+                    else:
+                        search_results = qdrant_client.search(
+                            collection_name=COLLECTION_NAME,
+                            query_vector=query_vector,
+                            query_filter=search_filter,
+                            limit=retrieval_depth
+                        )
 
                     # 3. Process Sources
                     context_chunks = []
