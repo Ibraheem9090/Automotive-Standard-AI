@@ -52,7 +52,7 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Helper: Generate Query Embedding (Reverted to 2048-dim model matching Qdrant collection)
+# Helper: Generate Query Embedding 
 def get_query_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
         input=[text],
@@ -123,7 +123,7 @@ if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
     st.session_state.messages = []
     st.rerun()
 
-# Default RAG search parameters (replaces user input fields)
+# Default RAG search parameters
 retrieval_depth = 5
 doc_id = None
 process_id = None
