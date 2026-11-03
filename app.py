@@ -34,6 +34,59 @@ def init_clients():
 
 nvidia_client, qdrant_client = init_clients()
 
+# Robust Dynamic Model Discovery & Fallback Chain
+@st.cache_resource
+def get_active_models_with_fallback(_client):
+    """Dynamically checks available NVIDIA NIM models and provides reliable fallbacks."""
+    default_embed = "nvidia/nemotron-3.5-embed-1b"
+    default_chat = "meta/llama-3.1-70b-instruct"
+    
+    if not _client:
+        return default_embed, default_chat
+    
+    try:
+        response = _client.models.list()
+        available_models = [m.id for m in response.data]
+        
+        # 1. Embedding Fallback Priority List
+        preferred_embeds = [
+            "nvidia/nemotron-3.5-embed-1b",
+            "nvidia/nemotron-3-embed-1b",
+        ]
+        selected_embed = default_embed
+        for model in preferred_embeds:
+            if model in available_models:
+                selected_embed = model
+                break
+        else:
+            fallback_embed = next((m for m in available_models if "embed" in m.lower()), None)
+            if fallback_embed:
+                selected_embed = fallback_embed
+
+        # 2. Chat LLM Fallback Priority List
+        preferred_chats = [
+            "meta/llama-3.1-70b-instruct",
+            "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.1-8b-instruct"
+        ]
+        selected_chat = default_chat
+        for model in preferred_chats:
+            if model in available_models:
+                selected_chat = model
+                break
+        else:
+            fallback_chat = next((m for m in available_models if "instruct" in m.lower() or "chat" in m.lower()), None)
+            if fallback_chat:
+                selected_chat = fallback_chat
+
+        return selected_embed, selected_chat
+        
+    except Exception:
+        return default_embed, default_chat
+
+# Fetch active models dynamically with fallbacks on startup
+ACTIVE_EMBED_MODEL, ACTIVE_CHAT_MODEL = get_active_models_with_fallback(nvidia_client)
+
 # Ensure Qdrant Payload Indexes exist
 @st.cache_resource
 def setup_qdrant_filters(_client, collection_name):
@@ -52,11 +105,11 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Helper: Generate Query Embedding 
+# Helper: Generate Query Embedding using dynamically discovered model
 def get_query_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
         input=[text],
-        model="nvidia/nemotron-3-embed-1b",
+        model=ACTIVE_EMBED_MODEL,
         encoding_format="float",
         extra_body={"input_type": "query"}
     )
@@ -75,7 +128,6 @@ def render_pdf_page_image(doc_id: str, page_number: int) -> bytes | None:
             break
 
     if not pdf_path:
-        # Search directory for matching filename
         for f in os.listdir(PDF_STORE_DIR):
             if doc_id.lower() in f.lower() and f.endswith(".pdf"):
                 pdf_path = os.path.join(PDF_STORE_DIR, f)
@@ -84,7 +136,6 @@ def render_pdf_page_image(doc_id: str, page_number: int) -> bytes | None:
     if pdf_path and os.path.exists(pdf_path):
         try:
             doc = fitz.open(pdf_path)
-            # fitz page index is 0-based
             if 0 <= (page_number - 1) < len(doc):
                 page = doc.load_page(page_number - 1)
                 pix = page.get_pixmap(dpi=150)
@@ -110,20 +161,19 @@ def build_qdrant_filter(doc_id: str = "", process_id: str = "") -> Filter | None
 # =========================================================
 st.sidebar.title("⚙️ System Control")
 
-# Clean Status Indicator
 if nvidia_client and qdrant_client:
     st.sidebar.markdown("🟢 **Status:** API Connected & RAG Cloud Connected")
+    st.sidebar.markdown(f"**Active Embed:** `{ACTIVE_EMBED_MODEL}`")
+    st.sidebar.markdown(f"**Active Chat:** `{ACTIVE_CHAT_MODEL}`")
 else:
     st.sidebar.markdown("🔴 **Status:** Connection Error (Check API Keys)")
 
 st.sidebar.divider()
 
-# Primary Chat Action
 if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
     st.session_state.messages = []
     st.rerun()
 
-# Default RAG search parameters
 retrieval_depth = 5
 doc_id = None
 process_id = None
@@ -137,7 +187,6 @@ st.caption("Retrieve and query compliance specifications across AIS automotive s
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display past chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -163,7 +212,6 @@ for message in st.session_state.messages:
                     
                     st.divider()
 
-# Chat Input
 if user_query := st.chat_input("Ask a question about AIS standards..."):
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
@@ -217,7 +265,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
 
                     context_str = "\n\n".join(context_chunks) if context_chunks else "No relevant document chunks found."
 
-                    # 4. Generate LLM Answer
+                    # 4. Generate LLM Answer using dynamic fallback chat model
                     system_prompt = (
                         "You are an expert AI assistant specializing in Indian Automotive Industry Standards (AIS).\n"
                         "Answer the user's query accurately using ONLY the provided context snippets below.\n"
@@ -226,7 +274,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                     )
 
                     response = nvidia_client.chat.completions.create(
-                        model="meta/llama-3.1-70b-instruct",
+                        model=ACTIVE_CHAT_MODEL,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_query}
@@ -237,10 +285,8 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
 
                     answer = response.choices[0].message.content
 
-                    # Display Response
                     st.markdown(answer)
 
-                    # Display Source Chunks & Render PDF Page Images
                     if sources_meta:
                         with st.expander("📄 Referenced Source Chunks & PDF Visuals"):
                             for idx, src in enumerate(sources_meta, 1):
@@ -263,7 +309,6 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                                 
                                 st.divider()
 
-                    # Save to Chat History
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer,
