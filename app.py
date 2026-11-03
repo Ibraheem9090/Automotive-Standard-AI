@@ -34,58 +34,9 @@ def init_clients():
 
 nvidia_client, qdrant_client = init_clients()
 
-# Robust Dynamic Model Discovery & Fallback Chain
-@st.cache_resource
-def get_active_models_with_fallback(_client):
-    """Dynamically checks available NVIDIA NIM models and provides reliable fallbacks."""
-    default_embed = "nvidia/nemotron-3.5-embed-1b"
-    default_chat = "meta/llama-3.1-70b-instruct"
-    
-    if not _client:
-        return default_embed, default_chat
-    
-    try:
-        response = _client.models.list()
-        available_models = [m.id for m in response.data]
-        
-        # 1. Embedding Fallback Priority List
-        preferred_embeds = [
-            "nvidia/nemotron-3.5-embed-1b",
-            "nvidia/nemotron-3-embed-1b",
-        ]
-        selected_embed = default_embed
-        for model in preferred_embeds:
-            if model in available_models:
-                selected_embed = model
-                break
-        else:
-            fallback_embed = next((m for m in available_models if "embed" in m.lower()), None)
-            if fallback_embed:
-                selected_embed = fallback_embed
-
-        # 2. Chat LLM Fallback Priority List
-        preferred_chats = [
-            "meta/llama-3.1-70b-instruct",
-            "meta/llama-3.3-70b-instruct",
-            "meta/llama-3.1-8b-instruct"
-        ]
-        selected_chat = default_chat
-        for model in preferred_chats:
-            if model in available_models:
-                selected_chat = model
-                break
-        else:
-            fallback_chat = next((m for m in available_models if "instruct" in m.lower() or "chat" in m.lower()), None)
-            if fallback_chat:
-                selected_chat = fallback_chat
-
-        return selected_embed, selected_chat
-        
-    except Exception:
-        return default_embed, default_chat
-
-# Fetch active models dynamically with fallbacks on startup
-ACTIVE_EMBED_MODEL, ACTIVE_CHAT_MODEL = get_active_models_with_fallback(nvidia_client)
+# Stable Model Constants matching Qdrant 2048-dim collection and active NIM endpoints
+EMBED_MODEL = "nvidia/nemotron-3.5-embed-1b"
+CHAT_MODEL = "meta/llama-3.1-70b-instruct"
 
 # Ensure Qdrant Payload Indexes exist
 @st.cache_resource
@@ -105,11 +56,11 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Helper: Generate Query Embedding using dynamically discovered model
+# Helper: Generate Query Embedding
 def get_query_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
         input=[text],
-        model=ACTIVE_EMBED_MODEL,
+        model=EMBED_MODEL,
         encoding_format="float",
         extra_body={"input_type": "query"}
     )
@@ -163,8 +114,8 @@ st.sidebar.title("⚙️ System Control")
 
 if nvidia_client and qdrant_client:
     st.sidebar.markdown("🟢 **Status:** API Connected & RAG Cloud Connected")
-    st.sidebar.markdown(f"**Active Embed:** `{ACTIVE_EMBED_MODEL}`")
-    st.sidebar.markdown(f"**Active Chat:** `{ACTIVE_CHAT_MODEL}`")
+    st.sidebar.markdown(f"**Embed Model:** `{EMBED_MODEL}`")
+    st.sidebar.markdown(f"**Chat Model:** `{CHAT_MODEL}`")
 else:
     st.sidebar.markdown("🔴 **Status:** Connection Error (Check API Keys)")
 
@@ -224,7 +175,11 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
             with st.spinner("Searching standards & generating answer..."):
                 try:
                     # 1. Embed Query
-                    query_vector = get_query_embedding(user_query)
+                    try:
+                        query_vector = get_query_embedding(user_query)
+                    except Exception as embed_err:
+                        st.error(f"Embedding API Error (Check Embed Model/Endpoint): {str(embed_err)}")
+                        st.stop()
 
                     # 2. Search Qdrant
                     search_filter = build_qdrant_filter(doc_id=doc_id, process_id=process_id)
@@ -237,83 +192,4 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                             limit=retrieval_depth
                         )
                         search_results = response.points
-                    else:
-                        search_results = qdrant_client.search(
-                            collection_name=COLLECTION_NAME,
-                            query_vector=query_vector,
-                            query_filter=search_filter,
-                            limit=retrieval_depth
-                        )
-
-                    # 3. Process Sources
-                    context_chunks = []
-                    sources_meta = []
-                    for res in search_results:
-                        payload = res.payload
-                        chunk_text = payload.get("text", "")
-                        d_id = payload.get("doc_id", "Unknown")
-                        p_num = payload.get("page_number", 1)
-                        url = payload.get("github_raw_url", "")
-
-                        context_chunks.append(f"--- Document: {d_id} | Page: {p_num} ---\n{chunk_text}")
-                        sources_meta.append({
-                            "doc_id": d_id,
-                            "page_number": int(p_num) if str(p_num).isdigit() else 1,
-                            "text": chunk_text,
-                            "github_raw_url": url
-                        })
-
-                    context_str = "\n\n".join(context_chunks) if context_chunks else "No relevant document chunks found."
-
-                    # 4. Generate LLM Answer using dynamic fallback chat model
-                    system_prompt = (
-                        "You are an expert AI assistant specializing in Indian Automotive Industry Standards (AIS).\n"
-                        "Answer the user's query accurately using ONLY the provided context snippets below.\n"
-                        "If the information cannot be determined from the context, state clearly that the documentation does not contain enough information.\n\n"
-                        f"=== RETRIEVED CONTEXT ===\n{context_str}\n========================="
-                    )
-
-                    response = nvidia_client.chat.completions.create(
-                        model=ACTIVE_CHAT_MODEL,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_query}
-                        ],
-                        temperature=0.2,
-                        max_tokens=1024
-                    )
-
-                    answer = response.choices[0].message.content
-
-                    st.markdown(answer)
-
-                    if sources_meta:
-                        with st.expander("📄 Referenced Source Chunks & PDF Visuals"):
-                            for idx, src in enumerate(sources_meta, 1):
-                                st.markdown(f"### Source {idx} — {src['doc_id']} (Page {src['page_number']})")
-                                
-                                col_text, col_img = st.columns([1, 1])
-                                
-                                with col_text:
-                                    st.markdown("**Extracted Text Context:**")
-                                    st.text(src['text'])
-                                    if src.get('github_raw_url'):
-                                        st.markdown(f"[🔗 View Document Source File]({src['github_raw_url']})")
-
-                                with col_img:
-                                    img_bytes = render_pdf_page_image(src['doc_id'], src['page_number'])
-                                    if img_bytes:
-                                        st.image(img_bytes, caption=f"Visual Page {src['page_number']} of {src['doc_id']}", use_container_width=True)
-                                    else:
-                                        st.info("Visual page preview unavailable for this item.")
-                                
-                                st.divider()
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": answer,
-                        "sources": sources_meta
-                    })
-
-                except Exception as e:
-                    st.error(f"An error occurred while processing your query: {str(e)}")
+                    else
