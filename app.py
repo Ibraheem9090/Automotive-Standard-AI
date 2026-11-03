@@ -192,4 +192,86 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                             limit=retrieval_depth
                         )
                         search_results = response.points
-                    else
+                    else:  # <-- Fixed missing colon here
+                        search_results = qdrant_client.search(
+                            collection_name=COLLECTION_NAME,
+                            query_vector=query_vector,
+                            query_filter=search_filter,
+                            limit=retrieval_depth
+                        )
+
+                    # 3. Process Sources
+                    context_chunks = []
+                    sources_meta = []
+                    for res in search_results:
+                        payload = res.payload
+                        chunk_text = payload.get("text", "")
+                        d_id = payload.get("doc_id", "Unknown")
+                        p_num = payload.get("page_number", 1)
+                        url = payload.get("github_raw_url", "")
+
+                        context_chunks.append(f"--- Document: {d_id} | Page: {p_num} ---\n{chunk_text}")
+                        sources_meta.append({
+                            "doc_id": d_id,
+                            "page_number": int(p_num) if str(p_num).isdigit() else 1,
+                            "text": chunk_text,
+                            "github_raw_url": url
+                        })
+
+                    context_str = "\n\n".join(context_chunks) if context_chunks else "No relevant document chunks found."
+
+                    # 4. Generate LLM Answer
+                    system_prompt = (
+                        "You are an expert AI assistant specializing in Indian Automotive Industry Standards (AIS).\n"
+                        "Answer the user's query accurately using ONLY the provided context snippets below.\n"
+                        "If the information cannot be determined from the context, state clearly that the documentation does not contain enough information.\n\n"
+                        f"=== RETRIEVED CONTEXT ===\n{context_str}\n========================="
+                    )
+
+                    try:
+                        response = nvidia_client.chat.completions.create(
+                            model=CHAT_MODEL,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_query}
+                            ],
+                            temperature=0.2,
+                            max_tokens=1024
+                        )
+                        answer = response.choices[0].message.content
+                    except Exception as chat_err:
+                        st.error(f"Chat Completion API Error (Check Chat Model/Endpoint): {str(chat_err)}")
+                        st.stop()
+
+                    st.markdown(answer)
+
+                    if sources_meta:
+                        with st.expander("📄 Referenced Source Chunks & PDF Visuals"):
+                            for idx, src in enumerate(sources_meta, 1):
+                                st.markdown(f"### Source {idx} — {src['doc_id']} (Page {src['page_number']})")
+                                
+                                col_text, col_img = st.columns([1, 1])
+                                
+                                with col_text:
+                                    st.markdown("**Extracted Text Context:**")
+                                    st.text(src['text'])
+                                    if src.get('github_raw_url'):
+                                        st.markdown(f"[🔗 View Document Source File]({src['github_raw_url']})")
+
+                                with col_img:
+                                    img_bytes = render_pdf_page_image(src['doc_id'], src['page_number'])
+                                    if img_bytes:
+                                        st.image(img_bytes, caption=f"Visual Page {src['page_number']} of {src['doc_id']}", use_container_width=True)
+                                    else:
+                                        st.info("Visual page preview unavailable for this item.")
+                                
+                                st.divider()
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources_meta
+                    })
+
+                except Exception as e:
+                    st.error(f"An error occurred while processing your query: {str(e)}")
