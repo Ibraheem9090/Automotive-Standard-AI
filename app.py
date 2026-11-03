@@ -52,11 +52,11 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Robust Embedding Generator with On-the-Fly Fallback Loop
+# Robust Embedding Generator with Active Fallbacks
 def get_query_embedding(text: str) -> list[float]:
     embed_models = [
         "nvidia/nemotron-3.5-embed-1b",
-        "nvidia/nemotron-3-embed-1b"
+        "nvidia/nemotron-3.5-embed-8b"
     ]
     last_err = None
     for model in embed_models:
@@ -73,13 +73,12 @@ def get_query_embedding(text: str) -> list[float]:
             continue
     raise Exception(f"All embedding models failed. Last error: {str(last_err)}")
 
-# Robust Chat Completion with On-the-Fly Fallback Loop (Prevents 404/410 errors)
+# Robust Chat Completion with Active Fallback Loop
 def generate_chat_response(system_prompt: str, user_query: str) -> tuple[str, str]:
     chat_models = [
-        "meta/llama-3.1-70b-instruct",
-        "meta/llama-3.3-70b-instruct",
-        "meta/llama-3.1-8b-instruct",
-        "mistralai/mixtral-8x7b-instruct-v0.1"
+        "nvidia/nemotron-3.5-bolt-e4b",
+        "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "meta/llama-3.3-70b-instruct"
     ]
     last_err = None
     for model in chat_models:
@@ -147,7 +146,7 @@ st.sidebar.title("⚙️ System Control")
 
 if nvidia_client and qdrant_client:
     st.sidebar.markdown("🟢 **Status:** API Connected & RAG Cloud Connected")
-    st.sidebar.markdown("**Engine:** Self-Healing Multi-Model Fallback")
+    st.sidebar.markdown("**Engine:** Active Nim Fallback Loop")
 else:
     st.sidebar.markdown("🔴 **Status:** Connection Error (Check API Keys)")
 
@@ -252,7 +251,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
 
                     context_str = "\n\n".join(context_chunks) if context_chunks else "No relevant document chunks found."
 
-                    # 4. Generate LLM Answer using self-healing fallback loop
+                    # 4. Generate LLM Answer using active fallback loop
                     system_prompt = (
                         "You are an expert AI assistant specializing in Indian Automotive Industry Standards (AIS).\n"
                         "Answer the user's query accurately using ONLY the provided context snippets below.\n"
