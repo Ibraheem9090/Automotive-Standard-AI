@@ -52,11 +52,11 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Helper: Generate Query Embedding (Updated to nemotron-3.5-embed-8b)
+# Helper: Generate Query Embedding (Reverted to 2048-dim model matching Qdrant collection)
 def get_query_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
         input=[text],
-        model="nvidia/nemotron-3.5-embed-8b",
+        model="nvidia/nemotron-3-embed-1b",
         encoding_format="float",
         extra_body={"input_type": "query"}
     )
