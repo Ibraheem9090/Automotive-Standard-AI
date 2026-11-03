@@ -34,9 +34,55 @@ def init_clients():
 
 nvidia_client, qdrant_client = init_clients()
 
-# Stable Model Constants matching Qdrant 2048-dim collection and active NIM endpoints
-EMBED_MODEL = "nvidia/nemotron-3.5-embed-1b"
-CHAT_MODEL = "meta/llama-3.1-70b-instruct"
+# Dynamic Model Discovery & Auto-Rollover (Prevents hardcoded 404/410 errors)
+@st.cache_resource
+def discover_active_models(_client):
+    """Queries available models from NVIDIA NIM live and picks active ones with fallbacks."""
+    default_embed = "nvidia/nemotron-3.5-embed-1b"
+    default_chat = "meta/llama-3.3-70b-instruct"
+    
+    if not _client:
+        return default_embed, default_chat
+    
+    try:
+        response = _client.models.list()
+        model_ids = [m.id for m in response.data]
+        
+        # 1. Select active embedding model (matching 2048-dim collection requirements)
+        selected_embed = default_embed
+        preferred_embeds = ["nvidia/nemotron-3.5-embed-1b", "nvidia/nemotron-3-embed-1b"]
+        for model in preferred_embeds:
+            if model in model_ids:
+                selected_embed = model
+                break
+        else:
+            fallback_embed = next((m for m in model_ids if "embed" in m.lower()), None)
+            if fallback_embed:
+                selected_embed = fallback_embed
+
+        # 2. Select active chat instruction model (auto-rolls over if 3.1 is retired)
+        selected_chat = default_chat
+        preferred_chats = [
+            "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.1-70b-instruct",
+            "meta/llama-3.1-8b-instruct",
+            "meta/llama3-70b-instruct"
+        ]
+        for model in preferred_chats:
+            if model in model_ids:
+                selected_chat = model
+                break
+        else:
+            fallback_chat = next((m for m in model_ids if "instruct" in m.lower() or "chat" in m.lower()), None)
+            if fallback_chat:
+                selected_chat = fallback_chat
+
+        return selected_embed, selected_chat
+    except Exception:
+        return default_embed, default_chat
+
+# Fetch active models dynamically at startup
+ACTIVE_EMBED_MODEL, ACTIVE_CHAT_MODEL = discover_active_models(nvidia_client)
 
 # Ensure Qdrant Payload Indexes exist
 @st.cache_resource
@@ -56,11 +102,11 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Helper: Generate Query Embedding
+# Helper: Generate Query Embedding using dynamically discovered active model
 def get_query_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
         input=[text],
-        model=EMBED_MODEL,
+        model=ACTIVE_EMBED_MODEL,
         encoding_format="float",
         extra_body={"input_type": "query"}
     )
@@ -114,8 +160,8 @@ st.sidebar.title("⚙️ System Control")
 
 if nvidia_client and qdrant_client:
     st.sidebar.markdown("🟢 **Status:** API Connected & RAG Cloud Connected")
-    st.sidebar.markdown(f"**Embed Model:** `{EMBED_MODEL}`")
-    st.sidebar.markdown(f"**Chat Model:** `{CHAT_MODEL}`")
+    st.sidebar.markdown(f"**Active Embed:** `{ACTIVE_EMBED_MODEL}`")
+    st.sidebar.markdown(f"**Active Chat:** `{ACTIVE_CHAT_MODEL}`")
 else:
     st.sidebar.markdown("🔴 **Status:** Connection Error (Check API Keys)")
 
@@ -178,7 +224,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                     try:
                         query_vector = get_query_embedding(user_query)
                     except Exception as embed_err:
-                        st.error(f"Embedding API Error (Check Embed Model/Endpoint): {str(embed_err)}")
+                        st.error(f"Embedding API Error: {str(embed_err)}")
                         st.stop()
 
                     # 2. Search Qdrant
@@ -192,7 +238,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                             limit=retrieval_depth
                         )
                         search_results = response.points
-                    else:  # <-- Fixed missing colon here
+                    else:
                         search_results = qdrant_client.search(
                             collection_name=COLLECTION_NAME,
                             query_vector=query_vector,
@@ -220,7 +266,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
 
                     context_str = "\n\n".join(context_chunks) if context_chunks else "No relevant document chunks found."
 
-                    # 4. Generate LLM Answer
+                    # 4. Generate LLM Answer using dynamically discovered model
                     system_prompt = (
                         "You are an expert AI assistant specializing in Indian Automotive Industry Standards (AIS).\n"
                         "Answer the user's query accurately using ONLY the provided context snippets below.\n"
@@ -230,7 +276,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
 
                     try:
                         response = nvidia_client.chat.completions.create(
-                            model=CHAT_MODEL,
+                            model=ACTIVE_CHAT_MODEL,
                             messages=[
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_query}
@@ -240,7 +286,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                         )
                         answer = response.choices[0].message.content
                     except Exception as chat_err:
-                        st.error(f"Chat Completion API Error (Check Chat Model/Endpoint): {str(chat_err)}")
+                        st.error(f"Chat Completion API Error: {str(chat_err)}")
                         st.stop()
 
                     st.markdown(answer)
