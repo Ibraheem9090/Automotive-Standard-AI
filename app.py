@@ -52,17 +52,17 @@ def setup_qdrant_filters(_client, collection_name):
 if qdrant_client:
     setup_qdrant_filters(qdrant_client, COLLECTION_NAME)
 
-# Helper: Generate Query Embedding
+# Helper: Generate Query Embedding (Updated to nemotron-3.5-embed-8b)
 def get_query_embedding(text: str) -> list[float]:
     response = nvidia_client.embeddings.create(
         input=[text],
-        model="nvidia/nemotron-3-embed-1b",
+        model="nvidia/nemotron-3.5-embed-8b",
         encoding_format="float",
         extra_body={"input_type": "query"}
     )
     return response.data[0].embedding
 
-# Helper: Render PDF Page as Image (PyMuPDF)
+# Helper: Render PDF Page Image (PyMuPDF)
 def render_pdf_page_image(doc_id: str, page_number: int) -> bytes | None:
     """Renders a specific page of a PDF document to PNG bytes."""
     possible_names = [f"{doc_id}.pdf", f"{doc_id.lower()}.pdf", f"{doc_id.upper()}.pdf"]
@@ -105,7 +105,6 @@ def build_qdrant_filter(doc_id: str = "", process_id: str = "") -> Filter | None
         
     return Filter(must=must_conditions)
 
-# ==========================================
 # =========================================================
 # SIDEBAR / SYSTEM CONTROL
 # =========================================================
@@ -147,7 +146,6 @@ for message in st.session_state.messages:
                 for idx, src in enumerate(message["sources"], 1):
                     st.markdown(f"### Source {idx} — {src['doc_id']} (Page {src['page_number']})")
                     
-                    # Split into columns: Text Chunk on Left, Visual PDF Image on Right
                     col_text, col_img = st.columns([1, 1])
                     
                     with col_text:
@@ -180,7 +178,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                     # 1. Embed Query
                     query_vector = get_query_embedding(user_query)
 
-                    # 2. Search Qdrant (Supports both new and legacy qdrant-client versions)
+                    # 2. Search Qdrant
                     search_filter = build_qdrant_filter(doc_id=doc_id, process_id=process_id)
                     
                     if hasattr(qdrant_client, "query_points"):
@@ -228,7 +226,7 @@ if user_query := st.chat_input("Ask a question about AIS standards..."):
                     )
 
                     response = nvidia_client.chat.completions.create(
-                        model="meta/llama-3.2-11b-vision-instruct",
+                        model="meta/llama-3.1-70b-instruct",
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_query}
